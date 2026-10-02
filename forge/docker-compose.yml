@@ -1,0 +1,43 @@
+# Stele Phase 0 forge: Forgejo plus one Actions runner, on SQLite. HOST ONLY
+# (AT's sandbox note: never run docker in the agent sandbox). Brought up and
+# seeded by ./up.sh; torn down with `docker compose down -v`.
+#
+# The forge is UNTRUSTED for standing (CODE_SHARING_PLAN.md §2): it hosts the
+# repository and fires a webhook, and nothing it says is scored.
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:16.0.5
+    container_name: stele-forgejo
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - FORGEJO__database__DB_TYPE=sqlite3
+      - FORGEJO__security__INSTALL_LOCK=true
+      - FORGEJO__server__ROOT_URL=http://localhost:3000/
+      - FORGEJO__server__HTTP_PORT=3000
+      - FORGEJO__actions__ENABLED=true
+      # The verifier listens on a private/loopback address; the default
+      # ("external") would refuse to deliver to it.
+      - FORGEJO__webhook__ALLOWED_HOST_LIST=private,loopback
+      - FORGEJO__service__DISABLE_REGISTRATION=true
+    ports:
+      - "3000:3000"
+    volumes:
+      - forgejo-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  runner:
+    image: code.forgejo.org/forgejo/runner:13.2.0
+    container_name: stele-runner
+    depends_on: [forgejo]
+    user: "0:0"
+    # Registered by up.sh (forgejo-runner register), then started as a daemon.
+    command: ["sh", "-c", "while [ ! -f /data/.runner ]; do sleep 2; done; forgejo-runner daemon"]
+    working_dir: /data
+    volumes:
+      - runner-data:/data
+
+volumes:
+  forgejo-data:
+  runner-data:

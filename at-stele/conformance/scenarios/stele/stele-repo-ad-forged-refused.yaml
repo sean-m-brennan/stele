@@ -1,0 +1,35 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-repo-ad-forged-refused
+byte_pinning: false
+description: |
+    A repo ad whose signature is not its owner's is refused: carol signed the
+    ad alice sent.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+steps:
+  - id: 1
+    from: alice
+    to: bob
+    function: stele repo
+    payload:
+      name: demo
+      url: http://forge.local/alice/demo.git
+      ref: main
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      seq: 1
+      ts: 1790000000
+      forged_by: carol
+    description: the signature does not verify against alice's key.
+
+expected_state:
+  bob:
+    stele_ads_held: 0

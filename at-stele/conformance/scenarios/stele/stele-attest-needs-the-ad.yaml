@@ -1,0 +1,30 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attest-needs-the-ad
+byte_pinning: false
+description: |
+    The attest verb refuses unless the verifier holds a verified ad from the
+    owner at that commit: no ad, no attestation, and no score.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+steps:
+  - id: 1
+    from: carol
+    to: carol
+    function: trigger_stele_attest
+    payload:
+      owner: alice
+      commit: "0123456789abcdef0123456789abcdef01234567"
+    description: carol has never received alice's ad.
+
+expected_state:
+  carol:
+    stele_scores: []

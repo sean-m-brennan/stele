@@ -1,0 +1,6 @@
+# Native build output (build.sh)
+native/build/
+# live-cohort scratch (test/cohort/stele_cohort.sh run dirs)
+.coh/
+**/__pycache__/
+*.pyc

@@ -1,0 +1,45 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attest-clean-scores-well
+byte_pinning: false
+description: |
+    A clean scan earns its owner 0.8: an attestation is evidence either way.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+fixtures:
+  stele_ads:
+    carol:
+      - owner: alice
+        name: demo
+        url: http://forge.local/alice/demo.git
+        ref: main
+        commit: "0123456789abcdef0123456789abcdef01234567"
+        seq: 1
+        ts: 1790000000
+
+steps:
+  - id: 1
+    from: carol
+    to: carol
+    function: trigger_stele_attest
+    payload:
+      owner: alice
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      verdict: clean
+      count: 0
+      max_severity: ""
+    description: carol scans alice's commit and finds nothing.
+
+expected_state:
+  carol:
+    stele_scores:
+      - subject: alice
+        score: 0.8

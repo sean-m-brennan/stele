@@ -1,0 +1,53 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attest-verb-refused-from-the-wire
+byte_pinning: false
+description: |
+    An app verb is local only. bob sends carol a message named
+    `app_stele_attest`; carol holds alice's ad, so the verb would otherwise
+    attest and submit a score in carol's name. Both runtimes refuse it as a
+    wire frame (C identity_is_local_app_verb, Python is_local_app_verb): no
+    score is submitted.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+fixtures:
+  stele_ads:
+    carol:
+      - owner: alice
+        name: demo
+        url: http://forge.local/alice/demo.git
+        ref: main
+        commit: "0123456789abcdef0123456789abcdef01234567"
+        seq: 1
+        ts: 1790000000
+
+steps:
+  - id: 1
+    from: bob
+    to: carol
+    function: app_stele_attest
+    payload:
+      owner: alice
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      scanner: osv-scanner
+      scanner_version: "2.6.0"
+      db_digest: "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      findings_digest: "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+      verdict: vuln
+      count: 1
+      max_severity: HIGH
+    description: |
+        A peer tries to make carol attest, with every field the verb needs, so
+        only the origin check stands between it and a score.
+
+expected_state:
+  carol:
+    stele_scores: []

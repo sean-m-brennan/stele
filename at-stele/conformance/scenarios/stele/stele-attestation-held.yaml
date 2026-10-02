@@ -1,0 +1,36 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attestation-held
+byte_pinning: false
+description: |
+    A verifier's signed attestation is verified and held. It is the document
+    the verifier's attested score rests on: its id is that score's evidence
+    digest, so any member can match the score to what was found.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+steps:
+  - id: 1
+    from: carol
+    to: bob
+    function: stele attest
+    payload:
+      ad_owner: alice
+      name: demo
+      url: http://forge.local/alice/demo.git
+      ref: main
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      seq: 1
+      ts: 1790000000
+    description: carol publishes her scan of alice's commit.
+
+expected_state:
+  bob:
+    stele_attestations_held: 1

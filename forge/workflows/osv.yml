@@ -1,0 +1,22 @@
+# The OWNER's own scan (Stele Phase 0 CI seam). It proves the runner works and
+# gives the owner a report; it is the owner's claim about itself (a future
+# `certificate` channel) and is NOT scored. The scored scan is the verifier's,
+# made from its own clone (verifier/stele_hook.py).
+#
+# `run:` steps only, so nothing is fetched from an actions marketplace.
+name: osv
+on: [push]
+jobs:
+  scan:
+    runs-on: stele
+    steps:
+      - name: fetch the commit
+        run: |
+          git clone "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" src
+          git -C src checkout "${GITHUB_SHA}"
+      - name: osv-scanner
+        run: |
+          wget -q -O osv-scanner https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
+          chmod +x osv-scanner
+          ./osv-scanner scan source -r --format json src > osv.json || true
+          head -c 2000 osv.json
