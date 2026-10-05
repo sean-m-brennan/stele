@@ -170,8 +170,8 @@ static int _multicast(const process_t *proc, char *function, json_t *env,
     return rc;
 }
 
-/* Submit the verifier-attested score to the reputation process, with the
- * bounded retry at-social uses for its own scores. */
+/* Submit the verifier-attested score to the reputation process, retried as
+ * every identity one-shot is (identity_send_to). */
 static void _submit_attested(const process_t *proc, const uuid_t subject,
                              double score, const char *digest)
 {
@@ -185,17 +185,10 @@ static void _submit_attested(const process_t *proc, const uuid_t subject,
     msg.info.tx_score.attested = true;
     at_strlcpy(msg.info.tx_score.evidence_digest, digest,
                sizeof(msg.info.tx_score.evidence_digest));
-    int ret = -1;
-    for (int attempt = 0; attempt < 10; attempt++)
-    {
-        ret = messaging_send("reputation", TRANSACTION_SCORE, &msg, false);
-        if (ret == 0)
-            break;
-        usleep(20000);
-    }
-    if (ret != 0)
-        log_warn(proc->logger, "Identity: could not submit the attested score "
-                 "after 10 tries; nothing retries it\n");
+    /* Kept past a long burst and retried on the identity tick (AT ISSUES
+     * §2.40); identity_send_to reports a loss itself. */
+    (void)identity_send_to(proc, "reputation", &msg, "the attested score",
+                           "reputation");
     /* The observable a scenario asserts, independent of the quorum round. */
     pthread_mutex_lock(&st.lock);
     if (st.n_scores < STELE_SCORES_CAP)
