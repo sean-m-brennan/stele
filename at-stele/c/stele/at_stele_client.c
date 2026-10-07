@@ -76,3 +76,72 @@ int at_stele_attest(const char *q_out, const char *owner, const char *commit,
                                 "verdict", verdict, "count", (json_int_t)count,
                                 "max_severity", max_severity ? max_severity : ""));
 }
+
+static const char *_or_empty(const char *s)
+{
+    return s != NULL ? s : "";
+}
+
+int at_stele_advertise_repo2(const char *q_out, const char *name, const char *url,
+                             const char *ref, const char *commit, int64_t seq,
+                             const char *description, const char *topics,
+                             const char *sbom_digest, const char *sbom_path,
+                             const char *claim_verdict)
+{
+    if (name == NULL || url == NULL || ref == NULL || commit == NULL)
+        return -1;
+    return _send_verb(q_out, AT_APP_STELE_ADVERTISE_REPO,
+                      json_pack("{s:s, s:s, s:s, s:s, s:I, s:s, s:s, s:s, s:s, s:s}",
+                                "name", name, "url", url, "ref", ref, "commit", commit,
+                                "seq", (json_int_t)seq,
+                                "description", _or_empty(description),
+                                "topics", _or_empty(topics),
+                                "sbom_digest", _or_empty(sbom_digest),
+                                "sbom_path", _or_empty(sbom_path),
+                                "claim_verdict",
+                                claim_verdict != NULL ? claim_verdict : "none"));
+}
+
+int at_stele_attest2(const char *q_out, const char *owner, const char *commit,
+                     const char *scanner, const char *scanner_version,
+                     const char *db_digest, const char *findings_digest,
+                     const char *verdict, int64_t count, const char *max_severity,
+                     const char *channel, const char *url)
+{
+    return at_stele_attest3(q_out, owner, commit, scanner, scanner_version,
+                            db_digest, findings_digest, verdict, count,
+                            max_severity, channel, url, NULL);
+}
+
+int at_stele_attest3(const char *q_out, const char *owner, const char *commit,
+                     const char *scanner, const char *scanner_version,
+                     const char *db_digest, const char *findings_digest,
+                     const char *verdict, int64_t count, const char *max_severity,
+                     const char *channel, const char *url, const char *replicates)
+{
+    if (owner == NULL || commit == NULL || scanner == NULL || scanner_version == NULL
+        || db_digest == NULL || findings_digest == NULL || verdict == NULL)
+        return -1;
+    json_t *env = json_pack("{s:s, s:s, s:s, s:s, s:s, s:s, s:s, s:I, s:s, s:s}",
+                            "owner", owner, "commit", commit, "scanner", scanner,
+                            "scanner_version", scanner_version,
+                            "db_digest", db_digest,
+                            "findings_digest", findings_digest,
+                            "verdict", verdict, "count", (json_int_t)count,
+                            "max_severity", _or_empty(max_severity),
+                            "channel", channel != NULL ? channel : "probe");
+    if (env != NULL && url != NULL)
+        json_object_set_new(env, "url", json_string(url));
+    if (env != NULL && replicates != NULL && replicates[0] != '\0')
+        json_object_set_new(env, "replicates", json_string(replicates));
+    return _send_verb(q_out, AT_APP_STELE_ATTEST, env);
+}
+
+int at_stele_rebut(const char *q_out, const char *attestation_id, const char *text)
+{
+    if (attestation_id == NULL || text == NULL)
+        return -1;
+    return _send_verb(q_out, AT_APP_STELE_REBUT,
+                      json_pack("{s:s, s:s}", "attestation_id", attestation_id,
+                                "text", text));
+}

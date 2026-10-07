@@ -71,6 +71,56 @@ static void _ad_from(json_t *spec, const uuid_t owner, stele_repo_ad_t *ad)
     snprintf(ad->commit, sizeof(ad->commit), "%s", _s(spec, "commit", DEF_COMMIT));
     ad->seq = _i(spec, "seq", 1);
     ad->ts = _i(spec, "ts", 1790000000);
+    if (_i(spec, "v", 1) == 2)
+    {
+        ad->version = 2;
+        snprintf(ad->description, sizeof(ad->description), "%s",
+                 _s(spec, "description", ""));
+        snprintf(ad->topics, sizeof(ad->topics), "%s", _s(spec, "topics", ""));
+        snprintf(ad->sbom_digest, sizeof(ad->sbom_digest), "%s",
+                 _s(spec, "sbom_digest", ""));
+        snprintf(ad->sbom_path, sizeof(ad->sbom_path), "%s", _s(spec, "sbom_path", ""));
+        snprintf(ad->claim_verdict, sizeof(ad->claim_verdict), "%s",
+                 _s(spec, "claim_verdict", "none"));
+    }
+}
+
+/* A (v1) attestation of @p ad by @p verifier, the rest from @p spec. Mirrors
+ * the Python adapter's _attestation_from. */
+static void _attestation_from(json_t *spec, const stele_repo_ad_t *ad,
+                              const uuid_t verifier, stele_attestation_t *at)
+{
+    memset(at, 0, sizeof(*at));
+    uuid_copy(at->verifier, verifier);
+    stele_repo_ad_id(ad, at->repo_ad_id);
+    snprintf(at->commit, sizeof(at->commit), "%s", ad->commit);
+    snprintf(at->scanner, sizeof(at->scanner), "%s", _s(spec, "scanner", "osv-scanner"));
+    snprintf(at->scanner_version, sizeof(at->scanner_version), "%s",
+             _s(spec, "scanner_version", "2.6.0"));
+    snprintf(at->db_digest, sizeof(at->db_digest), "%s", _s(spec, "db_digest",
+             "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"));
+    snprintf(at->findings_digest, sizeof(at->findings_digest), "%s",
+             _s(spec, "findings_digest",
+                "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"));
+    snprintf(at->verdict, sizeof(at->verdict), "%s", _s(spec, "verdict", "vuln"));
+    at->count = _i(spec, "count", 1);
+    snprintf(at->max_severity, sizeof(at->max_severity), "%s",
+             _s(spec, "max_severity", "HIGH"));
+    at->ts = _i(spec, "ts", 1790000100);
+}
+
+/* The attestation an `about` spec names (a stele_attestations entry), with its
+ * ad. False when a participant it names is unknown. */
+static bool _about(sce_run_ctx_t *ctx, json_t *about, stele_repo_ad_t *ad,
+                   stele_attestation_t *at)
+{
+    ic_impl_t *owner = _impl_of(ctx, _s(about, "ad_owner", NULL));
+    ic_impl_t *verifier = _impl_of(ctx, _s(about, "verifier", NULL));
+    if (owner == NULL || owner->pub == NULL || verifier == NULL || verifier->pub == NULL)
+        return false;
+    _ad_from(about, owner->pub->uuid, ad);
+    _attestation_from(about, ad, verifier->pub->uuid, at);
+    return true;
 }
 
 /* The key a step is signed with: its sender's, or `forged_by`'s. */
@@ -99,6 +149,21 @@ static void _stele_fixtures(sce_run_ctx_t *ctx, json_t *fixtures)
             stele_repo_ad_t ad;
             _ad_from(spec, owner->pub->uuid, &ad);
             stele_hold_ad_for_test(&ad);
+        }
+    }
+    json_t *ats = json_object_get(fixtures, "stele_attestations");
+    json_object_foreach(ats, pid, list)
+    {
+        size_t i;
+        json_t *spec;
+        json_array_foreach(list, i, spec)
+        {
+            stele_repo_ad_t ad;
+            stele_attestation_t at;
+            if (!_about(ctx, spec, &ad, &at))
+                continue;
+            stele_hold_ad_for_test(&ad);
+            stele_hold_attestation_for_test(&at);
         }
     }
 }
@@ -164,23 +229,7 @@ static int _stele_inbound(sce_run_ctx_t *ctx, sce_participant_t *sender,
         stele_repo_ad_t ad;
         _ad_from(payload, ad_owner->pub->uuid, &ad);
         stele_attestation_t at;
-        memset(&at, 0, sizeof(at));
-        uuid_copy(at.verifier, verifier->pub->uuid);
-        stele_repo_ad_id(&ad, at.repo_ad_id);
-        snprintf(at.commit, sizeof(at.commit), "%s", ad.commit);
-        snprintf(at.scanner, sizeof(at.scanner), "%s", _s(payload, "scanner", "osv-scanner"));
-        snprintf(at.scanner_version, sizeof(at.scanner_version), "%s",
-                 _s(payload, "scanner_version", "2.6.0"));
-        snprintf(at.db_digest, sizeof(at.db_digest), "%s", _s(payload, "db_digest",
-                 "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"));
-        snprintf(at.findings_digest, sizeof(at.findings_digest), "%s",
-                 _s(payload, "findings_digest",
-                    "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"));
-        snprintf(at.verdict, sizeof(at.verdict), "%s", _s(payload, "verdict", "vuln"));
-        at.count = _i(payload, "count", 1);
-        snprintf(at.max_severity, sizeof(at.max_severity), "%s",
-                 _s(payload, "max_severity", "HIGH"));
-        at.ts = _i(payload, "ts", 1790000100);
+        _attestation_from(payload, &ad, verifier->pub->uuid, &at);
         char sig[STELE_SIG_HEX + 1] = {0};
         if (stele_attestation_sign(&at, _signer_sk(ctx, payload, sender_impl), sig) != 0)
         {
@@ -188,6 +237,35 @@ static int _stele_inbound(sce_run_ctx_t *ctx, sce_participant_t *sender,
             return -1;
         }
         json_t *env = stele_attestation_to_json(&at, sig);
+        net_msg_pack_json(&out->info.net_msg, env);
+        json_decref(env);
+        return 0;
+    }
+    if (strcmp(function, "stele rebut") == 0)
+    {
+        stele_repo_ad_t ad;
+        stele_attestation_t at;
+        if (!_about(ctx, json_object_get(payload, "about"), &ad, &at))
+        {
+            snprintf(ctx->err, sizeof(ctx->err), "stele rebut: unknown participant");
+            return -1;
+        }
+        ic_impl_t *owner = _impl_of(ctx, _s(payload, "owner", NULL));
+        if (owner == NULL)
+            owner = sender_impl;
+        stele_rebuttal_t rb;
+        memset(&rb, 0, sizeof(rb));
+        uuid_copy(rb.owner, owner->pub->uuid);
+        stele_attestation_id(&at, rb.attestation_id);
+        snprintf(rb.text, sizeof(rb.text), "%s", _s(payload, "text", "a false positive"));
+        rb.ts = _i(payload, "ts", 1790000200);
+        char sig[STELE_SIG_HEX + 1] = {0};
+        if (stele_rebuttal_sign(&rb, _signer_sk(ctx, payload, sender_impl), sig) != 0)
+        {
+            snprintf(ctx->err, sizeof(ctx->err), "stele rebut: cannot sign");
+            return -1;
+        }
+        json_t *env = stele_rebuttal_to_json(&rb, sig);
         net_msg_pack_json(&out->info.net_msg, env);
         json_decref(env);
         return 0;
@@ -220,6 +298,18 @@ static int _stele_dispatch(sce_run_ctx_t *ctx, sce_participant_t *target,
             "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"),
         "verdict", _s(jp, "verdict", "vuln"), "count", (json_int_t)_i(jp, "count", 1),
         "max_severity", _s(jp, "max_severity", "HIGH"));
+    json_object_set_new(body, "channel", json_string(_s(jp, "channel", "probe")));
+    if (_s(jp, "url", NULL) != NULL)
+        json_object_set_new(body, "url", json_string(_s(jp, "url", NULL)));
+    /* `replicates`: an `about` spec naming the attestation this one re-ran,
+     * resolved to its id. Mirrors the Python adapter's _trigger_attest. */
+    json_t *about = json_object_get(jp, "replicates");
+    stele_repo_ad_t rad;
+    stele_attestation_t rat;
+    char rid[STELE_ID_HEX + 1];
+    if (json_is_object(about) && _about(ctx, about, &rad, &rat)
+        && stele_attestation_id(&rat, rid) == 0)
+        json_object_set_new(body, "replicates", json_string(rid));
     json_decref(jp);
     generic_msg_t m = {0};
     m.type = NET_MESSAGE;
@@ -258,6 +348,19 @@ static int _stele_check_key(sce_run_ctx_t *ctx, const char *pid, ic_impl_t *impl
         if (n != (int)json_integer_value(val))
         {
             snprintf(ctx->err, sizeof(ctx->err), "%s: stele_attestations_held=%d, "
+                     "expected %d", pid, n, (int)json_integer_value(val));
+            return -1;
+        }
+        return 0;
+    }
+    if (strcmp(key, "stele_rebuttals_held") == 0)
+    {
+        json_t *rbs = stele_held_rebuttals_json();
+        int n = (int)json_array_size(rbs);
+        json_decref(rbs);
+        if (n != (int)json_integer_value(val))
+        {
+            snprintf(ctx->err, sizeof(ctx->err), "%s: stele_rebuttals_held=%d, "
                      "expected %d", pid, n, (int)json_integer_value(val));
             return -1;
         }

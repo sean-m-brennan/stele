@@ -135,5 +135,182 @@ DEFINE_TEST(test_stele_fixed_vectors)
 }
 END_TEST_DEFINITION()
 
+/* Version 2 and the rebuttal (Phase 1): the ids the Python twin computes for
+ * the same artifacts (python/tests/test_codec.py, test_v2_fixed_vectors). */
+/* Version 3 (Phase 2): a replication names the attestation it re-ran
+ * (python/tests/test_codec.py, test_v3_fixed_vectors). */
+DEFINE_TEST(test_stele_v3_fixed_vectors)
+{
+    stele_repo_ad_t ad = _ad();
+    uuid_parse("00000000-0000-4000-8000-000000000001", ad.owner);
+    ad.version = 2;
+    snprintf(ad.description, sizeof(ad.description), "a demo repo");
+    snprintf(ad.topics, sizeof(ad.topics), "go,demo");
+    snprintf(ad.sbom_digest, sizeof(ad.sbom_digest), "%s",
+             "abababababababababababababababababababababababababababababababab");
+    snprintf(ad.sbom_path, sizeof(ad.sbom_path), "sbom.cdx.json");
+    snprintf(ad.claim_verdict, sizeof(ad.claim_verdict), "clean");
+    char ad_id[STELE_ID_HEX + 1], sc[STELE_DIGEST_HEX + 1], orig[STELE_ID_HEX + 1];
+    ck_assert_ret_ok(stele_repo_ad_id(&ad, ad_id));
+    ck_assert_ret_ok(stele_scope(ad.owner, "demo", COMMIT, "osv-scanner", sc));
+
+    stele_attestation_t at;
+    memset(&at, 0, sizeof(at));
+    uuid_parse("00000000-0000-4000-8000-000000000002", at.verifier);
+    snprintf(at.repo_ad_id, sizeof(at.repo_ad_id), "%s", ad_id);
+    snprintf(at.commit, sizeof(at.commit), "%s", COMMIT);
+    snprintf(at.scanner, sizeof(at.scanner), "osv-scanner");
+    snprintf(at.scanner_version, sizeof(at.scanner_version), "2.6.0");
+    snprintf(at.db_digest, sizeof(at.db_digest),
+             "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
+    snprintf(at.findings_digest, sizeof(at.findings_digest),
+             "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef");
+    snprintf(at.verdict, sizeof(at.verdict), "vuln");
+    at.count = 2;
+    snprintf(at.max_severity, sizeof(at.max_severity), "HIGH");
+    at.ts = 1790000100;
+    at.version = 2;
+    snprintf(at.channel, sizeof(at.channel), "self_consistency");
+    snprintf(at.scope, sizeof(at.scope), "%s", sc);
+    ck_assert_ret_ok(stele_attestation_id(&at, orig));
+
+    /* v2 cannot carry a replication; v3 must name what it replicates. */
+    snprintf(at.channel, sizeof(at.channel), "replication");
+    ck_assert(!stele_attestation_valid(&at));
+    at.version = 3;
+    ck_assert(!stele_attestation_valid(&at));
+    snprintf(at.replicates, sizeof(at.replicates), "%s", orig);
+    ck_assert(stele_attestation_valid(&at));
+    char id[STELE_ID_HEX + 1];
+    ck_assert_ret_ok(stele_attestation_id(&at, id));
+    ck_assert_str_eq(id, "d0af362981b137e5cc47219e63f164689e33ba54dba1c6c1858907418f0406b3");
+
+    /* Round trip through the envelope keeps the version and the reference. */
+    char sig[STELE_SIG_HEX + 1];
+    memset(sig, '0', STELE_SIG_HEX);
+    sig[STELE_SIG_HEX] = '\0';
+    json_t *env = stele_attestation_to_json(&at, sig);
+    ck_assert_ptr_nonnull(env);
+    ck_assert_int_eq((int)json_integer_value(json_object_get(env, "v")), 3);
+    stele_attestation_t back;
+    char sig_back[STELE_SIG_HEX + 1];
+    ck_assert_ret_ok(stele_attestation_from_json(env, &back, sig_back));
+    ck_assert_str_eq(back.replicates, orig);
+    json_object_del(env, "replicates");
+    ck_assert(stele_attestation_from_json(env, &back, sig_back) != 0);
+    json_decref(env);
+
+    /* A non-replication v3 carries none. */
+    snprintf(at.channel, sizeof(at.channel), "probe");
+    ck_assert(!stele_attestation_valid(&at));
+    at.replicates[0] = '\0';
+    ck_assert(stele_attestation_valid(&at));
+}
+END_TEST_DEFINITION()
+
+DEFINE_TEST(test_stele_v2_fixed_vectors)
+{
+    stele_repo_ad_t ad = _ad();
+    uuid_parse("00000000-0000-4000-8000-000000000001", ad.owner);
+    ad.version = 2;
+    snprintf(ad.description, sizeof(ad.description), "a demo repo");
+    snprintf(ad.topics, sizeof(ad.topics), "go,demo");
+    snprintf(ad.sbom_digest, sizeof(ad.sbom_digest), "%s",
+             "abababababababababababababababababababababababababababababababab");
+    snprintf(ad.sbom_path, sizeof(ad.sbom_path), "sbom.cdx.json");
+    snprintf(ad.claim_verdict, sizeof(ad.claim_verdict), "clean");
+    char id[STELE_ID_HEX + 1];
+    ck_assert_ret_ok(stele_repo_ad_id(&ad, id));
+    ck_assert_str_eq(id, "272c0cc3307694e5eca75b6415d11b1d71dc1e5f7690f0be0ee9b61c2d563b89");
+
+    char sc[STELE_DIGEST_HEX + 1];
+    ck_assert_ret_ok(stele_scope(ad.owner, "demo", COMMIT, "osv-scanner", sc));
+    ck_assert_str_eq(sc, "7f198d461dddd03608116142875b6cfcabbd06e5d4336bd76444aee2d82372e4");
+
+    stele_attestation_t at;
+    memset(&at, 0, sizeof(at));
+    uuid_parse("00000000-0000-4000-8000-000000000002", at.verifier);
+    snprintf(at.repo_ad_id, sizeof(at.repo_ad_id), "%s", id);
+    snprintf(at.commit, sizeof(at.commit), "%s", COMMIT);
+    snprintf(at.scanner, sizeof(at.scanner), "osv-scanner");
+    snprintf(at.scanner_version, sizeof(at.scanner_version), "2.6.0");
+    snprintf(at.db_digest, sizeof(at.db_digest),
+             "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
+    snprintf(at.findings_digest, sizeof(at.findings_digest),
+             "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef");
+    snprintf(at.verdict, sizeof(at.verdict), "vuln");
+    at.count = 2;
+    snprintf(at.max_severity, sizeof(at.max_severity), "HIGH");
+    at.ts = 1790000100;
+    at.version = 2;
+    snprintf(at.channel, sizeof(at.channel), "self_consistency");
+    snprintf(at.scope, sizeof(at.scope), "%s", sc);
+    ck_assert_ret_ok(stele_attestation_id(&at, id));
+    ck_assert_str_eq(id, "ae530d953d26c613153103de30b8aca1aa17bc5a30833d03011aa3f105ada506");
+
+    stele_rebuttal_t rb;
+    memset(&rb, 0, sizeof(rb));
+    uuid_copy(rb.owner, ad.owner);
+    snprintf(rb.attestation_id, sizeof(rb.attestation_id), "%s", id);
+    snprintf(rb.text, sizeof(rb.text), "fixed in the next release");
+    rb.ts = 1790000200;
+    ck_assert_ret_ok(stele_rebuttal_id(&rb, id));
+    ck_assert_str_eq(id, "32472c5b8ecda607b2e84ec404bf3973f021990ec7beab33e6cedbfac1d6e8ce");
+}
+END_TEST_DEFINITION()
+
+/* A v2 envelope round-trips as v2, a v1 envelope still reads as v1, and the
+ * rebuttal signs, verifies and round-trips. */
+DEFINE_TEST(test_stele_v2_envelopes_and_rebuttal)
+{
+    ck_assert(sodium_init() >= 0);
+    unsigned char pk[crypto_sign_PUBLICKEYBYTES], sk[crypto_sign_SECRETKEYBYTES];
+    crypto_sign_keypair(pk, sk);
+    stele_repo_ad_t ad = _ad();
+    ad.version = 2;
+    snprintf(ad.claim_verdict, sizeof(ad.claim_verdict), "none");
+    char sig[STELE_SIG_HEX + 1], sig2[STELE_SIG_HEX + 1];
+    ck_assert_ret_ok(stele_repo_ad_sign(&ad, sk, sig));
+    json_t *env = stele_repo_ad_to_json(&ad, sig);
+    stele_repo_ad_t back;
+    ck_assert_ret_ok(stele_repo_ad_from_json(env, &back, sig2));
+    ck_assert_int_eq(back.version, 2);
+    ck_assert(stele_repo_ad_verify(&back, pk, sig2));
+    json_object_del(env, "claim_verdict");               /* v2 without its field */
+    ck_assert(stele_repo_ad_from_json(env, &back, sig2) != 0);
+    json_decref(env);
+
+    stele_repo_ad_t v1 = _ad();
+    env = stele_repo_ad_to_json(&v1, sig);
+    ck_assert_ret_ok(stele_repo_ad_from_json(env, &back, sig2));
+    ck_assert_int_eq(back.version, 1);
+    json_decref(env);
+
+    ad = _ad();
+    ad.version = 2;
+    snprintf(ad.claim_verdict, sizeof(ad.claim_verdict), "clean");
+    snprintf(ad.sbom_digest, sizeof(ad.sbom_digest), "%s", HEX64);
+    ck_assert(!stele_repo_ad_valid(&ad));                /* digest without path */
+
+    stele_rebuttal_t rb;
+    memset(&rb, 0, sizeof(rb));
+    uuid_generate(rb.owner);
+    snprintf(rb.attestation_id, sizeof(rb.attestation_id), "%s", HEX64);
+    snprintf(rb.text, sizeof(rb.text), "a false positive: the module is vendored");
+    rb.ts = 1;
+    ck_assert_ret_ok(stele_rebuttal_sign(&rb, sk, sig));
+    env = stele_rebuttal_to_json(&rb, sig);
+    stele_rebuttal_t rb2;
+    ck_assert_ret_ok(stele_rebuttal_from_json(env, &rb2, sig2));
+    json_decref(env);
+    ck_assert(stele_rebuttal_verify(&rb2, pk, sig2));
+    snprintf(rb2.text, sizeof(rb2.text), "changed");
+    ck_assert(!stele_rebuttal_verify(&rb2, pk, sig2));
+}
+END_TEST_DEFINITION()
+
 RUN_TESTS(SteleCodec, test_stele_repo_ad_signs_verifies_and_round_trips,
-          test_stele_field_rules, test_stele_fixed_vectors)
+          test_stele_field_rules, test_stele_fixed_vectors,
+          test_stele_v2_fixed_vectors,
+          test_stele_v3_fixed_vectors,
+          test_stele_v2_envelopes_and_rebuttal)

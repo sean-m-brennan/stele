@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Stele</title>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; width: 340px; margin: 10px; color: #1f2328; }
+  input[type=search] { width: 100%; box-sizing: border-box; padding: 4px; }
+  .hit { margin-top: 8px; border-left: 4px solid #57606a; padding-left: 6px; }
+  .name { font-weight: 600; }
+  .muted { color: #57606a; font-size: 11px; }
+  details { margin-top: 10px; }
+  #grant { margin-bottom: 8px; border-left: 4px solid #9a6700; padding-left: 6px; }
+</style>
+</head>
+<body>
+<div id="grant" hidden>
+  <div class="muted">Stele needs access to forge pages and to your node.
+    Firefox asks for this separately from installing.</div>
+  <button id="grant-btn">Grant access</button>
+</div>
+<input id="q" type="search" placeholder="Search repositories your node has heard of">
+<div id="out"></div>
+<details>
+  <summary class="muted">Settings</summary>
+  <label>stele_view port <input id="port" type="number" min="1" max="65535"></label>
+</details>
+<script src="panel.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>

@@ -23,6 +23,9 @@ class SteleProtocol(Protocol):
     repo = 'stele repo'
     #: A signed attestation document, group multicast, first person only.
     attest = 'stele attest'
+    #: The repo owner's signed reply to an attestation, group multicast.
+    rebut = 'stele rebut'
     #: App verbs (local only).
     app_advertise_repo = 'app_stele_advertise_repo'
     app_attest = 'app_stele_attest'
+    app_rebut = 'app_stele_rebut'

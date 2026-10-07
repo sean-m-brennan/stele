@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Stele trust panel",
+  "version": "0.1.0",
+  "description": "A repository's safety standing, as your own Stele node verified it.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js", "scripts": ["panel.js", "background.js"] },
+  "content_scripts": [{
+    "matches": ["http://*/*", "https://*/*"],
+    "js": ["panel.js", "content.js"],
+    "run_at": "document_idle"
+  }],
+  "action": { "default_popup": "popup.html", "default_title": "Stele" },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "stele-panel@continuous-space",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  }
+}

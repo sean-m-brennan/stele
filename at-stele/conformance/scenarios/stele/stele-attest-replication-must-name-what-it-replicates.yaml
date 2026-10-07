@@ -1,0 +1,41 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attest-replication-must-name-what-it-replicates
+byte_pinning: false
+description: |
+    A replication that does not name the attestation it re-ran is not one.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: verifier
+
+fixtures:
+  stele_attestations:
+    carol:
+      - verifier: bob
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+
+steps:
+  - id: 1
+    from: carol
+    to: carol
+    function: trigger_stele_attest
+    payload:
+      owner: alice
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      verdict: vuln
+      count: 1
+      channel: replication
+    description: carol attests on replication.
+
+expected_state:
+  carol:
+    stele_scores: []

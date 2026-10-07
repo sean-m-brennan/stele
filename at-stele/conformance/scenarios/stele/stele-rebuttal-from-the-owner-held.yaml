@@ -1,0 +1,45 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-rebuttal-from-the-owner-held
+byte_pinning: false
+description: |
+    The owner of the repo a finding is about may answer it. bob holds carol's
+    attestation about alice's repo; alice's signed rebuttal is held beside it.
+    It is shown, never scored.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+fixtures:
+  stele_attestations:
+    bob:
+      - verifier: carol
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+
+steps:
+  - id: 1
+    from: alice
+    to: bob
+    function: stele rebut
+    payload:
+      about:
+        verifier: carol
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+      text: the module is vendored and never built
+    description: alice rebuts carol's finding.
+
+expected_state:
+  bob:
+    stele_rebuttals_held: 1

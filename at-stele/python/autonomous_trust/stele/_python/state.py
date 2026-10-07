@@ -17,8 +17,9 @@
 attested scores it submitted (the observable a scenario asserts). Twin of the
 `st` struct in id_stele.c, with the same caps."""
 
-ADS_CAP = 64
-ATTEST_CAP = 64
+ADS_CAP = 256
+ATTEST_CAP = 256
+REBUT_CAP = 256
 SCORES_CAP = 64
 
 
@@ -26,6 +27,7 @@ class SteleState:
     def __init__(self):
         self.ads: dict = {}            # ad id -> ad (dict)
         self.attestations: dict = {}   # attestation id -> attestation (dict)
+        self.rebuttals: dict = {}      # rebuttal id -> rebuttal (dict)
         self.scores_sent: list = []    # [{subject, score, digest}]
         self.ad_seq = 0
 

@@ -15,6 +15,7 @@
 # ******************
 """stele_ctl's `verify` and osv summary, against a synthetic evidence document
 built with AutonomousTrust's own writer (the C node writes the same schema)."""
+import json
 import os
 import sys
 from uuid import uuid4
@@ -100,3 +101,97 @@ def test_osv_summary():
         {'id': 'GO-2', 'database_specific': {'severity': 'HIGH'}}]}]}]}
     v = stele_ctl.summarize_osv(report)
     assert v[:3] == ('vuln', 2, 'HIGH') and len(v[3]) == 64
+
+
+FIXTURE = os.path.normpath(os.path.join(
+    os.path.dirname(__file__), '..', '..', '..', '..', 'lib', 'autonomous_trust', 'src',
+    'autonomous-trust', 'tests', 'a_unit', 'fixtures', 'attested_record_from_c.json'))
+
+
+ROSTER = os.path.join(os.path.dirname(FIXTURE), 'roster_from_c.json')
+
+
+def _archived(tmp_path, record, roster=True):
+    """A node root holding `record`, and the C node's roster beside it."""
+    adir = tmp_path / 'etc' / 'at' / 'attested'
+    adir.mkdir(parents=True, exist_ok=True)
+    (adir / 'task.json').write_text(json.dumps(record))
+    if roster:
+        with open(ROSTER) as f:
+            (tmp_path / 'etc' / 'at' / 'roster.cfg.json').write_text(f.read())
+    return str(tmp_path)
+
+
+def test_an_archived_record_written_by_a_c_node_verifies_without_keys(tmp_path):
+    with open(FIXTURE) as f:
+        record = json.load(f)
+    subject = record['entry']['subject_id']
+    r = stele_ctl.verify_records(_archived(tmp_path, record), subject)
+    assert r['ok'] and r['records'][0]['verified']
+    assert r['records'][0]['channel'] == 'probe'
+    assert not stele_ctl.verify_records(str(tmp_path), str(uuid4()))['ok']
+
+
+def test_a_tampered_archived_record_does_not_verify(tmp_path):
+    with open(FIXTURE) as f:
+        record = json.load(f)
+    record['entry']['p1_score'] = 0.8
+    r = stele_ctl.verify_records(_archived(tmp_path, record),
+                                 record['entry']['subject_id'])
+    assert not r['ok'] and r['unverified'] == 1 and r['records'][0]['reasons']
+
+
+def test_standing_of_an_unheard_repository_is_unknown(tmp_path, capsys):
+    assert stele_ctl.cmd_standing(str(tmp_path), 'http://f/a/b.git') == 1
+    assert json.loads(capsys.readouterr().out) == {'state': 'unknown', 'heard': False}
+    assert stele_ctl.cmd_search(str(tmp_path), 'b') == 0
+
+
+def test_without_the_roster_nothing_verifies(tmp_path):
+    with open(FIXTURE) as f:
+        record = json.load(f)
+    r = stele_ctl.verify_records(_archived(tmp_path, record, roster=False),
+                                 record['entry']['subject_id'])
+    assert not r['ok'] and not r['anchored']
+    assert 'no roster' in r['records'][0]['reasons'][0]
+
+
+def test_a_bundle_verifies_against_the_viewers_roster_only(tmp_path):
+    """Handed over in a bundle, the C node's record verifies at a viewer holding
+    the same roster; a viewer of another group refuses it."""
+    with open(FIXTURE) as f:
+        record = json.load(f)
+    subject = record['entry']['subject_id']
+    viewer = tmp_path / 'viewer'
+    (viewer / 'etc' / 'at').mkdir(parents=True)
+    with open(ROSTER) as f:
+        roster = json.load(f)
+    (viewer / 'etc' / 'at' / 'roster.cfg.json').write_text(json.dumps(roster))
+    r = stele_ctl.verify_records(str(viewer), subject, {'records': [record]})
+    assert r['ok'] and r['records'][0]['source'] == 'bundle'
+    roster['members'] = {str(uuid4()): m for m in roster['members'].values()}
+    (viewer / 'etc' / 'at' / 'roster.cfg.json').write_text(json.dumps(roster))
+    assert not stele_ctl.verify_records(str(viewer), subject,
+                                        {'records': [record]})['ok']
+
+
+def test_the_bundle_command_exports_what_the_node_holds(tmp_path, capsys):
+    root = tmp_path
+    ads = root / 'etc' / 'stele' / 'ads'
+    ats = root / 'etc' / 'stele' / 'attestations'
+    ads.mkdir(parents=True)
+    ats.mkdir(parents=True)
+    (ads / 'a1.json').write_text(json.dumps({'url': 'http://f/x.git'}))
+    (ads / 'a2.json').write_text(json.dumps({'url': 'http://f/other.git'}))
+    (ats / 't1.json').write_text(json.dumps({'repo_ad_id': 'a1'}))
+    (ats / 't2.json').write_text(json.dumps({'repo_ad_id': 'a2'}))
+    adir = root / 'etc' / 'at' / 'attested'
+    adir.mkdir(parents=True)
+    (adir / 'r1.json').write_text(json.dumps({'entry': {'evidence_digest': 't1'}}))
+    (adir / 'r2.json').write_text(json.dumps({'entry': {'evidence_digest': 't2'}}))
+    assert stele_ctl.cmd_bundle(str(root), 'http://f/x.git') == 0
+    b = json.loads(capsys.readouterr().out)
+    assert b['schema'] == 'stele-bundle-1'
+    assert [r['entry']['evidence_digest'] for r in b['records']] == ['t1']
+    assert b['attestations'] == [{'repo_ad_id': 'a1'}]
+    assert b['ads'] == [{'url': 'http://f/x.git'}]

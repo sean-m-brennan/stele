@@ -1,0 +1,48 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attest-replication-of-itself-refused
+byte_pinning: false
+description: |
+    A replication is a second verifier's re-run. carol cannot replicate her own
+    attestation, or one voice would count as two.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: verifier
+
+fixtures:
+  stele_attestations:
+    carol:
+      - verifier: carol
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+
+steps:
+  - id: 1
+    from: carol
+    to: carol
+    function: trigger_stele_attest
+    payload:
+      owner: alice
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      verdict: vuln
+      count: 1
+      channel: replication
+      replicates:
+        verifier: carol
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+    description: carol attests on replication.
+
+expected_state:
+  carol:
+    stele_scores: []

@@ -1,0 +1,53 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attest-replication-scores
+byte_pinning: false
+description: |
+    carol holds bob's finding about alice's repo, re-runs the same check (same
+    commit, scanner, scanner version and database), and attests what she got
+    on `replication`, naming bob's attestation. She found the same, so it
+    scores 0.3 about alice. Whether two verifiers agree is the viewer's fold;
+    the verb only refuses what is not a re-run.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: verifier
+
+fixtures:
+  stele_attestations:
+    carol:
+      - verifier: bob
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+
+steps:
+  - id: 1
+    from: carol
+    to: carol
+    function: trigger_stele_attest
+    payload:
+      owner: alice
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      verdict: vuln
+      count: 1
+      channel: replication
+      replicates:
+        verifier: bob
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+    description: carol attests on replication.
+
+expected_state:
+  carol:
+    stele_scores:
+      - subject: alice
+        score: 0.3

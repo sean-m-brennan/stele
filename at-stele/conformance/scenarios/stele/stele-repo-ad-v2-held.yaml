@@ -1,0 +1,41 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-repo-ad-v2-held
+byte_pinning: false
+description: |
+    A version-2 ad carries the repo's description and the owner's claims (an
+    SBOM's digest and path, its own CI verdict) under its own tag, and is held
+    like a v1 ad: from its owner, signed by the owner's key.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+steps:
+  - id: 1
+    from: alice
+    to: bob
+    function: stele repo
+    payload:
+      name: demo
+      url: http://forge.local/alice/demo.git
+      ref: v1.0.0
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      seq: 1
+      ts: 1790000000
+      v: 2
+      description: a demo repo
+      topics: go,demo
+      sbom_digest: "abababababababababababababababababababababababababababababababab"
+      sbom_path: sbom.cdx.json
+      claim_verdict: clean
+    description: alice advertises a release with an SBOM and a clean claim.
+
+expected_state:
+  bob:
+    stele_ads_held: 1

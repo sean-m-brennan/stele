@@ -1,0 +1,44 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-rebuttal-from-another-refused
+byte_pinning: false
+description: |
+    Only the owner of the repo a finding is about may rebut it. carol, the
+    verifier, sending a rebuttal of her own finding is refused.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+fixtures:
+  stele_attestations:
+    bob:
+      - verifier: carol
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+
+steps:
+  - id: 1
+    from: carol
+    to: bob
+    function: stele rebut
+    payload:
+      about:
+        verifier: carol
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+      text: not mine to answer
+    description: carol tries to rebut on alice's behalf.
+
+expected_state:
+  bob:
+    stele_rebuttals_held: 0

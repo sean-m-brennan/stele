@@ -1,0 +1,51 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attest-certificate-scores
+byte_pinning: false
+description: |
+    A verifier checks the SBOM the owner's ad carries against what its own scan
+    sees and finds it does not hold. That is a finding on the `certificate`
+    channel, scored 0.3 about the ad's owner.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+fixtures:
+  stele_ads:
+    carol:
+      - owner: alice
+        name: demo
+        url: http://forge.local/alice/demo.git
+        ref: main
+        commit: "0123456789abcdef0123456789abcdef01234567"
+        seq: 1
+        ts: 1790000000
+        v: 2
+        sbom_digest: "abababababababababababababababababababababababababababababababab"
+        sbom_path: sbom.cdx.json
+        claim_verdict: none
+
+steps:
+  - id: 1
+    from: carol
+    to: carol
+    function: trigger_stele_attest
+    payload:
+      owner: alice
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      verdict: vuln
+      count: 1
+      channel: certificate
+    description: carol attests on certificate.
+
+expected_state:
+  carol:
+    stele_scores:
+      - subject: alice
+        score: 0.3

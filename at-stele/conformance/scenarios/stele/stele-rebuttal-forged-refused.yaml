@@ -1,0 +1,45 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-rebuttal-forged-refused
+byte_pinning: false
+description: |
+    A rebuttal naming alice as its owner but signed by another key does not
+    verify against alice's, and is refused.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+fixtures:
+  stele_attestations:
+    bob:
+      - verifier: carol
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+
+steps:
+  - id: 1
+    from: alice
+    to: bob
+    function: stele rebut
+    payload:
+      about:
+        verifier: carol
+        ad_owner: alice
+        url: http://forge.local/alice/demo.git
+        verdict: vuln
+        count: 1
+      text: forged
+      forged_by: carol
+    description: a rebuttal in alice's name, signed by carol.
+
+expected_state:
+  bob:
+    stele_rebuttals_held: 0

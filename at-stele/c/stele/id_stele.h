@@ -42,4 +42,13 @@ size_t stele_scores_sent(stele_score_sent_t *out, size_t cap);
 /* Hold an ad as if it had arrived verified (fixtures only). */
 void stele_hold_ad_for_test(const stele_repo_ad_t *ad);
 
+/* [{owner, attestation_id, id}]; caller owns. */
+json_t *stele_held_rebuttals_json(void);
+
+/* Forget what is held and reload it from the store, as a restart does. */
+void stele_reload_for_test(void);
+
+/* Hold an attestation as if it had arrived verified (fixtures only). */
+void stele_hold_attestation_for_test(const stele_attestation_t *at);
+
 #endif /* AT_ID_STELE_H */

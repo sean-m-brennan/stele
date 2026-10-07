@@ -15,8 +15,10 @@
 #   limitations under the License.
 # ******************
 #
-# stele_cohort.sh — Stele Phase 0 live check: a CVE finding lowers a repository
-# owner's AutonomousTrust reputation, verifiably, off the owner's hand.
+# stele_cohort.sh — Stele's live check. Phases 1-6 (Stele Phase 0): a CVE
+# finding lowers a repository owner's AutonomousTrust reputation, verifiably,
+# off the owner's hand. Phases 7-11 (Stele Phase 1): the repository itself
+# shows an un-forgeable, decaying standing, folded from the viewer's own node.
 #
 # Three real steled nodes on one virtual L2 segment (bridge + netns):
 #
@@ -48,11 +50,33 @@
 #      owner is reported before and after.
 #   6. THE OWNER CANNOT FORK IT AWAY: the owner restarts with its chain wiped;
 #      catch-up brings the certified entry back into its own evidence.
+#   7. THE BATTERY: the owner commits its own syft SBOM and advertises the
+#      commit with a v2 ad that names it and claims the release clean. The
+#      verifier runs osv-scanner, gitleaks and the license check (plus semgrep
+#      when given), checks the SBOM against its own syft (`certificate`), and,
+#      since osv still finds x/net, attests the contradicted claim
+#      (`self_consistency`). The observer's standing (`stele_ctl.py
+#      standing`, what the trust panel shows) is failing-unconfirmed, with
+#      each reason: since Stele Phase 2 a finding is confirmed only when two
+#      verifiers agree, and this cohort has one (stele_redteam.sh has two).
+#   8. THE REBUTTAL: the owner signs a response to the osv finding. The
+#      observer shows it beside the finding, and the standing stays failing.
+#   9. THE FIX: the owner drops x/net and releases again. The new commit is a
+#      new scope, so AT's cap admits the re-scan, and the standing is clean
+#      from one verifier: single-source, which is not green (Phase 2; the
+#      red-team cohort shows verified-safe with two).
+#  10. THE ARCHIVE: the observer's attested records verify on their own
+#      (`stele_ctl.py verify` without keys), and still do after the observer
+#      restarts with its chain wiped; the standing does not move.
+#  11. THE PANEL'S SERVICE: viewer/stele_view.py answers /standing and /search
+#      over HTTP from the observer's files, and sends no CORS header.
 #
 # NETNS ONLY, on a HOST (not the agent sandbox). Requirements: root + iproute2,
 # python3 (with pynacl), git, and the built native layer (../../build.sh).
-# osv-scanner and its offline Go database are fetched into the run directory
-# unless OSV_SCANNER / OSV_DB name them. FORGE=1 also needs forge/up.sh run first.
+# osv-scanner and its offline Go database, syft and gitleaks are fetched into
+# the run directory unless OSV_SCANNER / OSV_DB / SYFT / GITLEAKS name them (or
+# syft and gitleaks are on PATH). semgrep joins the battery only when SEMGREP
+# and SEMGREP_RULES (offline rules) are both set. FORGE=1 also needs forge/up.sh run first.
 #
 # Usage:
 #   sudo -E env "PATH=$PATH" ./test/cohort/stele_cohort.sh
@@ -64,7 +88,9 @@
 #   owner's score must move less than SETTLE_EPS, default 0.003, over
 #   SETTLE_SEC, default 15), ATTEST_MIN_REP (the
 #   floor, default AT's 0.5; lowering it weakens what phase 2 shows and is
-#   reported), SUBNET (default 10.9.12), BUILD_DIR, LOG_LEVEL, KEEP=1, FORGE=1.
+#   reported), SUBNET (default 10.9.12), BUILD_DIR, LOG_LEVEL, KEEP=1, FORGE=1,
+#   SYFT_VERSION / GITLEAKS_VERSION (what is fetched), VIEW_PORT (phase 11,
+#   default 18099).
 
 set -u
 
@@ -87,6 +113,9 @@ LOG_LEVEL="${LOG_LEVEL:-2}"
 SUBNET="${SUBNET:-10.9.12}"
 PREFIX=24
 MIN_REP="${ATTEST_MIN_REP:-0.5}"
+SYFT_VERSION="${SYFT_VERSION:-1.18.1}"
+GITLEAKS_VERSION="${GITLEAKS_VERSION:-8.21.2}"
+VIEW_PORT="${VIEW_PORT:-18099}"
 
 NODES=(owner verifier observer)
 declare -A IP NS V VB ROOT PID
@@ -204,6 +233,7 @@ node_stop() { # name
 
 HOOK_PID=""
 SAMPLER_PID=""
+VIEW_PID=""
 dump_logs() {
   local n
   for n in "${NODES[@]}"; do
@@ -218,6 +248,7 @@ cleanup() {
   local rc="${1:-0}" n
   [ -n "$HOOK_PID" ] && kill "$HOOK_PID" 2>/dev/null
   [ -n "$SAMPLER_PID" ] && kill "$SAMPLER_PID" 2>/dev/null
+  [ -n "$VIEW_PID" ] && kill "$VIEW_PID" 2>/dev/null
   for n in "${NODES[@]}"; do node_stop "$n"; done
   if [ "${KEEP:-0}" = "1" ] || [ "$rc" != "0" ]; then
     log "Leaving the network and $RUN in place (exit $rc). Tear down with:"
@@ -468,5 +499,201 @@ owner_has_it() { ctl verify "${ROOT[owner]}" "${U[owner]}" "${KEYS[@]}" >"$RUN/v
 wait_for "$WAIT" owner_has_it || { cat "$RUN/verify-owner.json"; fail "phase 6" "the owner's caught-up chain lacks the certified entry"; }
 ok "phase 6: the owner's own evidence holds the certified entry again"
 
-log "PASS: stele — a finding lowered the owner's standing, certified by a quorum the owner was not part of"
+# --------------------------------------------------------------------------- #
+# Phase 1 (Stele): a repository's standing, from the battery, on its own page
+# --------------------------------------------------------------------------- #
+# The observer stands in for a viewer: its stele_view folds the standing the
+# trust panel shows, from its archived records and its Stele store alone.
+standing_is() { # label spec...  (spec: state=S | commit=C | has=SCANNER:CHANNEL:VERDICT | rebutted=SCANNER)
+  local label="$1"; shift
+  ctl standing "${ROOT[observer]}" "$CLONE_URL" >"$RUN/standing-$label.json" 2>/dev/null
+  python3 - "$RUN/standing-$label.json" "$@" <<'P'
+import json, sys
+try:
+    st = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(1)
+checks = {(c['scanner'], c['channel']): c for c in st.get('checks') or []}
+for spec in sys.argv[2:]:
+    k, _, v = spec.partition('=')
+    if k == 'state' and st.get('state') != v:
+        sys.exit(1)
+    if k == 'commit' and (st.get('repo') or {}).get('commit') != v:
+        sys.exit(1)
+    if k == 'has':
+        scanner, channel, verdict = v.split(':')
+        c = checks.get((scanner, channel))
+        if c is None or c['verdict'] != verdict:
+            sys.exit(1)
+    if k == 'rebutted' and not any(c['scanner'] == v and c.get('rebuttal')
+                                   for c in checks.values()):
+        sys.exit(1)
+P
+}
+show_standing() { # label
+  python3 - "$RUN/standing-$1.json" <<'P'
+import json, sys
+st = json.load(open(sys.argv[1]))
+print(f"    {st['repo']['name']} @ {st['repo']['commit'][:12]}: {st['state']}, score {st.get('score')}")
+for c in st.get('checks') or []:
+    print(f"      {c['reason']}")
+    if c.get('rebuttal'):
+        print(f"        owner's response (not scored): {c['rebuttal']}")
+P
+}
+
+SYFT="${SYFT:-$(command -v syft || true)}"
+GITLEAKS="${GITLEAKS:-$(command -v gitleaks || true)}"
+if [ -z "$SYFT" ]; then
+  log "fetching syft $SYFT_VERSION into the run directory"
+  mkdir -p "$RUN/tools"
+  curl -fsSL "https://github.com/anchore/syft/releases/download/v$SYFT_VERSION/syft_${SYFT_VERSION}_linux_amd64.tar.gz" \
+    | tar -xz -C "$RUN/tools" syft || fail "phase 7" "could not fetch syft; set SYFT"
+  SYFT="$RUN/tools/syft"
+fi
+if [ -z "$GITLEAKS" ]; then
+  log "fetching gitleaks $GITLEAKS_VERSION into the run directory"
+  mkdir -p "$RUN/tools"
+  curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+    | tar -xz -C "$RUN/tools" gitleaks || fail "phase 7" "could not fetch gitleaks; set GITLEAKS"
+  GITLEAKS="$RUN/tools/gitleaks"
+fi
+BATTERY=(osv-scanner gitleaks license)
+if [ -n "${SEMGREP:-}" ] && [ -n "${SEMGREP_RULES:-}" ]; then
+  BATTERY+=(semgrep)
+else
+  log "semgrep is not in this run (set SEMGREP and SEMGREP_RULES, offline rules, to add it)"
+fi
+python3 - "$RUN/battery.json" "$OSV_SCANNER" "$OSV_DB" "$SYFT" "$GITLEAKS" \
+  "${SEMGREP:-}" "${SEMGREP_RULES:-}" "${HOOK_SECRET:-}" "$CLONE_URL" "${U[owner]}" \
+  "${BATTERY[@]}" <<'P'
+import json, sys
+out, osv, db, syft, gitleaks, semgrep, rules, secret, url, owner, *battery = sys.argv[1:]
+json.dump({'secret': secret, 'osv_scanner': osv, 'osv_db': db, 'syft': syft,
+           'gitleaks': gitleaks, 'semgrep': semgrep, 'semgrep_rules': rules,
+           'scanners': battery, 'repos': {url: owner}}, open(out, 'w'))
+P
+if [ "${FORGE:-0}" = "1" ]; then
+  kill "$HOOK_PID" 2>/dev/null; wait "$HOOK_PID" 2>/dev/null
+  STELE_SHIM="$SHIM" python3 "$HOOK" --root "${ROOT[verifier]}" --config "$RUN/battery.json" \
+    >>"$RUN/hook.log" 2>&1 &
+  HOOK_PID=$!
+  sleep 2
+fi
+
+# A commit, its v2 ad (the owner's SBOM and claim), and the verifier's battery
+# over it: on Forgejo through the webhook, otherwise from the verifier's clone.
+release() { # seq message
+  local seq="$1" msg="$2" c
+  "$SYFT" "dir:$REPO" -o cyclonedx-json -q >"$RUN/sbom.cdx.json" \
+    || fail "phase $seq" "the owner's syft failed"
+  cp "$RUN/sbom.cdx.json" "$REPO/sbom.cdx.json"
+  git -C "$REPO" -c user.name=owner -c user.email=owner@stele add -A
+  git -C "$REPO" -c user.name=owner -c user.email=owner@stele commit --quiet -m "$msg"
+  c="$(git -C "$REPO" rev-parse HEAD)"
+  held() { saw verifier "stele repo demo@${c:0:12}"; }
+  for _ in 1 2 3 4 5; do
+    ctl advertise "${ROOT[owner]}" demo "$CLONE_URL" main "$c" "$seq" \
+      --description "a demo web server" --topics go,http \
+      --sbom "sbom.cdx.json=$REPO/sbom.cdx.json" --claim clean >/dev/null
+    wait_for 15 held && break
+  done
+  held || fail "phase $seq" "the verifier never held the owner's v2 ad for ${c:0:12}"
+  if [ "${FORGE:-0}" = "1" ]; then
+    git -C "$REPO" push --quiet --force "$PUSH_URL" main || fail "phase $seq" "push to Forgejo failed"
+    wait_for "$WAIT" grep -q "attested ${c:0:12} osv-scanner" "$RUN/hook.log" \
+      || fail "phase $seq" "the webhook never ran the battery on ${c:0:12}"
+  else
+    STELE_SHIM="$SHIM" LD_LIBRARY_PATH="$ATCORE:${LD_LIBRARY_PATH:-}" python3 - \
+      "$HOOK" "${ROOT[verifier]}" "${U[owner]}" "$c" "$CLONE_URL" "$RUN/battery.json" <<'P' \
+      >>"$RUN/hook.log" 2>&1 || fail "phase $seq" "the battery failed on ${c:0:12} (see $RUN/hook.log)"
+import importlib.util, json, sys
+hook_path, root, owner, commit, url, cfg_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('stele_hook', hook_path)
+hook = importlib.util.module_from_spec(spec); spec.loader.exec_module(hook)
+cfg = json.load(open(cfg_path))
+ad = hook.find_ad(root, url, commit)
+if ad is None:
+    sys.exit('no held ad for this commit')
+for name, (verdict, count, _sev, _d) in hook.scan_and_attest(
+        root, url, commit, owner, ad, cfg).items():
+    print(f'stele_hook: attested {commit[:12]} {name}: {verdict} ({count})', flush=True)
+P
+  fi
+  RELEASE="$c"
+}
+
+log "Phase 7: the owner commits its SBOM and claims the release clean; the verifier runs the battery"
+release 2 "sbom"
+C2="$RELEASE"
+want7=(commit="$C2" state=failing-unconfirmed has=osv-scanner:probe:vuln has=gitleaks:probe:clean
+       has=sbom:certificate:clean has=claim:self_consistency:vuln)
+wait_for "$WAIT" standing_is c2 "${want7[@]}" \
+  || { cat "$RUN/standing-c2.json"; tail -n 20 "$RUN/hook.log"; fail "phase 7" "the observer's standing for ${C2:0:12} is not the battery's"; }
+show_standing c2
+ok "phase 7: failing (unconfirmed: one verifier) on a verified finding; the SBOM certified; the clean claim contradicted"
+
+log "Phase 8: the owner answers the finding with a signed rebuttal"
+AT_OSV="$(python3 -c "import json,sys; print(next(c['attestation_id'] for c in json.load(open(sys.argv[1]))['checks'] if c['scanner'] == 'osv-scanner'))" "$RUN/standing-c2.json")"
+ctl rebut "${ROOT[owner]}" "$AT_OSV" "x/net/html is imported for a side effect and never parses input" >/dev/null \
+  || fail "phase 8" "the rebut verb failed"
+wait_for "$WAIT" standing_is c2r commit="$C2" state=failing-unconfirmed rebutted=osv-scanner \
+  || { cat "$RUN/standing-c2r.json"; fail "phase 8" "the observer never showed the rebuttal"; }
+show_standing c2r
+ok "phase 8: the rebuttal is shown beside the finding, and the standing is still failing"
+
+log "Phase 9: the owner drops x/net; the fixed commit is scanned under its own scope"
+printf 'package main\n\nfunc main() {}\n' >"$REPO/main.go"
+printf 'module example.com/demo\n\ngo 1.21\n' >"$REPO/go.mod"
+release 3 "drop golang.org/x/net"
+C3="$RELEASE"
+want9=(commit="$C3" state=single-source has=osv-scanner:probe:clean has=sbom:certificate:clean)
+wait_for "$WAIT" standing_is c3 "${want9[@]}" \
+  || { cat "$RUN/standing-c3.json"; tail -n 20 "$RUN/hook.log"; fail "phase 9" "the standing never recovered on ${C3:0:12}"; }
+show_standing c3
+ok "phase 9: clean on the fixed commit from one verifier (single-source); the cap admitted a re-scan of the same repository"
+
+log "Phase 10: the observer's records outlive its chain"
+ctl verify "${ROOT[observer]}" "${U[owner]}" >"$RUN/records.json" 2>&1 \
+  || { cat "$RUN/records.json"; fail "phase 10" "the observer's archived records do not verify"; }
+NREC="$(python3 -c "import json,sys; print(sum(r['verified'] for r in json.load(open(sys.argv[1]))['records']))" "$RUN/records.json")"
+node_stop observer
+rm -f "${ROOT[observer]}/etc/at/reputation-history.cfg.json" "${ROOT[observer]}/etc/at/reputation.cfg.json"
+node_start observer
+sleep 4
+kill -0 "${PID[observer]}" 2>/dev/null || fail "phase 10" "the observer died on restart"
+ctl verify "${ROOT[observer]}" "${U[owner]}" >"$RUN/records-after.json" 2>&1 \
+  || { cat "$RUN/records-after.json"; fail "phase 10" "the archive did not survive the wipe"; }
+NREC2="$(python3 -c "import json,sys; print(sum(r['verified'] for r in json.load(open(sys.argv[1]))['records']))" "$RUN/records-after.json")"
+[ "$NREC2" -ge "$NREC" ] || fail "phase 10" "verified records fell from $NREC to $NREC2"
+standing_is c3w commit="$C3" state=single-source \
+  || { cat "$RUN/standing-c3w.json"; fail "phase 10" "the standing changed when the chain was wiped"; }
+ok "phase 10: $NREC2 archived record(s) about the owner verify with the chain gone; the standing is unchanged"
+
+log "Phase 11: the trust panel's service answers over HTTP"
+python3 "$STELE_DIR/viewer/stele_view.py" --root "${ROOT[observer]}" --port "$VIEW_PORT" \
+  >"$RUN/view.log" 2>&1 &
+VIEW_PID=$!
+wait_for 20 curl -fs "http://127.0.0.1:$VIEW_PORT/health" -o /dev/null \
+  || fail "phase 11" "stele_view never answered on 127.0.0.1:$VIEW_PORT"
+ENC="$(python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$CLONE_URL")"
+curl -fs "http://127.0.0.1:$VIEW_PORT/standing?url=$ENC" -o "$RUN/http-standing.json" \
+  || fail "phase 11" "/standing failed"
+curl -fs "http://127.0.0.1:$VIEW_PORT/search?q=http" -o "$RUN/http-search.json" \
+  || fail "phase 11" "/search failed"
+python3 - "$RUN/http-standing.json" "$RUN/http-search.json" "$C3" <<'P' || fail "phase 11" "the HTTP answers are not the standing"
+import json, sys
+st = json.load(open(sys.argv[1])); hits = json.load(open(sys.argv[2]))['results']
+assert st['state'] == 'single-source' and st['repo']['commit'] == sys.argv[3], st
+assert [h['repo']['name'] for h in hits] == ['demo'], hits
+P
+curl -fs -D "$RUN/http-headers.txt" -o /dev/null -H 'Origin: http://evil.example' \
+  "http://127.0.0.1:$VIEW_PORT/standing?url=$ENC" || fail "phase 11" "/standing with an Origin failed"
+if grep -qi '^access-control-allow-origin' "$RUN/http-headers.txt"; then
+  fail "phase 11" "stele_view lets a web page read it (CORS header present)"
+fi
+kill "$VIEW_PID" 2>/dev/null
+ok "phase 11: /standing and /search answer from the observer's files, and no web page may read them"
+
+log "PASS: stele — a finding lowered the owner's standing, certified by a quorum the owner was not part of; the repository's page standing followed the battery, the rebuttal, and the fix"
 exit 0

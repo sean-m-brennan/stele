@@ -30,6 +30,7 @@ install(FILES at_stele.h DESTINATION include/autonomous_trust)
 
 at_extension_tests(stele
     stele_codec_test
+    id_stele_test
 )
 
 # The `stele` conformance protocol: corpus and C adapter (../../conformance).

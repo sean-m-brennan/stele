@@ -1,7 +1,10 @@
-# The OWNER's own scan (Stele Phase 0 CI seam). It proves the runner works and
-# gives the owner a report; it is the owner's claim about itself (a future
-# `certificate` channel) and is NOT scored. The scored scan is the verifier's,
-# made from its own clone (verifier/stele_hook.py).
+# The OWNER's own scan and SBOM (Stele CI seam). Nothing here is scored as it
+# stands. What the owner may do with it is CLAIM: advertise the release with
+# `claim_verdict: clean` and the digest of the SBOM it commits
+# (`stele_ctl.py advertise --claim clean --sbom sbom.cdx.json=...`). The
+# verifier then checks both from its own clone: the SBOM against its own
+# (`certificate`), and the clean claim against its own scans
+# (`self_consistency`). See verifier/stele_hook.py.
 #
 # `run:` steps only, so nothing is fetched from an actions marketplace.
 name: osv
@@ -20,3 +23,13 @@ jobs:
           chmod +x osv-scanner
           ./osv-scanner scan source -r --format json src > osv.json || true
           head -c 2000 osv.json
+      - name: sbom (syft, CycloneDX)
+        # The runner is the host (label stele:host), so this is the host's own
+        # syft; the verifier compares against its syft, so both should agree.
+        run: |
+          if command -v syft >/dev/null; then
+            syft dir:src -o cyclonedx-json -q > sbom.cdx.json
+            sha256sum sbom.cdx.json
+          else
+            echo "syft is not installed on this runner; no SBOM"
+          fi
