@@ -46,9 +46,50 @@ static bool _hex_ok(const char *s, size_t len)
     return true;
 }
 
+/* Versions 2, 3 and 4 of the ad all carry the v2 fields. */
 static bool _v2(int version)
 {
-    return version == 2;
+    return version >= 2 && version <= 4;
+}
+
+bool stele_repo_ad_is_team(const stele_repo_ad_t *ad)
+{
+    return ad != NULL && (ad->version == 3 || (ad->version == 4 && ad->polity[0] != '\0'));
+}
+
+bool stele_purl_base_ok(const char *s)
+{
+    if (!_field_ok(s, STELE_PROVIDES_MAX, false) || strncmp(s, "pkg:", 4) != 0)
+        return false;
+    const char *t = s + 4;
+    size_t tn = 0;
+    while (t[tn] != '\0' && t[tn] != '/')
+    {
+        char c = t[tn];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '+'
+              || c == '-'))
+            return false;
+        tn++;
+    }
+    if (tn == 0 || t[tn] != '/' || t[tn + 1] == '\0')
+        return false;
+    for (const char *p = t + tn + 1; *p != '\0'; p++)
+        if (*p == '@' || *p == '?' || *p == '#' || *p == ' '
+            || (*p == '/' && (p[1] == '/' || p[1] == '\0')))
+            return false;
+    return true;
+}
+
+int stele_release_digest(const char *release_auth, char out[STELE_DIGEST_HEX + 1])
+{
+    if (release_auth == NULL || release_auth[0] == '\0'
+        || strnlen(release_auth, STELE_RELEASE_TEXT_MAX + 1) > STELE_RELEASE_TEXT_MAX)
+        return -1;
+    unsigned char digest[32];
+    crypto_generichash(digest, sizeof(digest), (const unsigned char *)release_auth,
+                       strlen(release_auth), NULL, 0);
+    sodium_bin2hex(out, STELE_DIGEST_HEX + 1, digest, sizeof(digest));
+    return 0;
 }
 
 static bool _claim_ok(const char *c)
@@ -67,6 +108,16 @@ static bool _channel_ok(const char *c)
 bool stele_repo_ad_valid(const stele_repo_ad_t *ad)
 {
     if (ad == NULL || (ad->version != 0 && ad->version != 1 && !_v2(ad->version)))
+        return false;
+    if (stele_repo_ad_is_team(ad))
+    {
+        char d[STELE_DIGEST_HEX + 1];
+        if (!_hex_ok(ad->polity, STELE_PK_HEX) || stele_release_digest(ad->release_auth, d) != 0)
+            return false;
+    }
+    else if (ad->version == 4 && ad->release_auth[0] != '\0')
+        return false;   /* a release authorization needs its polity */
+    if (ad->version == 4 && ad->provides[0] != '\0' && !stele_purl_base_ok(ad->provides))
         return false;
     bool v1 = !uuid_is_null(ad->owner)
         && _field_ok(ad->name, STELE_NAME_MAX, false)
@@ -97,6 +148,23 @@ static bool _v3_ok(const stele_attestation_t *at)
                  : at->replicates[0] == '\0');
 }
 
+/* A v4 attestation: a probe naming the finding it attributes and the builder
+ * machine whose guardian it lands on. Only a finding is attributed. */
+static bool _v4_ok(const stele_attestation_t *at)
+{
+    const char *g = at->guardian_of;
+    size_t n = strnlen(g, STELE_DID_TEXT_MAX + 1);
+    bool did = strncmp(g, "did:key:z", 9) == 0 && n <= STELE_DID_TEXT_MAX;
+    for (size_t i = 0; did && i < n; i++)
+        if ((unsigned char)g[i] < 0x21 || g[i] == '|' || (unsigned char)g[i] >= 0x7f)
+            did = false;
+    return strcmp(at->channel, STELE_CHANNEL_PROBE) == 0
+        && strcmp(at->verdict, STELE_VERDICT_VULN) == 0
+        && _hex_ok(at->scope, STELE_DIGEST_HEX)
+        && _hex_ok(at->attributes, STELE_ID_HEX) && did
+        && at->replicates[0] == '\0';
+}
+
 bool stele_attestation_valid(const stele_attestation_t *at)
 {
     if (at == NULL || uuid_is_null(at->verifier))
@@ -114,9 +182,10 @@ bool stele_attestation_valid(const stele_attestation_t *at)
         && _field_ok(at->max_severity, STELE_SEVERITY_MAX, true)
         && at->ts >= 0
         && (at->version == 0 || at->version == 1
-            || (_v2(at->version) && _channel_ok(at->channel)
+            || (at->version == 2 && _channel_ok(at->channel)
                 && _hex_ok(at->scope, STELE_DIGEST_HEX))
-            || (at->version == 3 && _v3_ok(at)));
+            || (at->version == 3 && _v3_ok(at))
+            || (at->version == 4 && _v4_ok(at)));
 }
 
 bool stele_rebuttal_valid(const stele_rebuttal_t *rb)
@@ -175,7 +244,22 @@ size_t stele_repo_ad_canonical(const stele_repo_ad_t *ad, uint8_t *out, size_t c
                      ad->claim_verdict);
     if (m < 0 || (size_t)m >= sizeof(body) - (size_t)n)
         return 0;
-    return _with_tag("STELE-REPO2", body, out, cap);
+    if (ad->version == 2)
+        return _with_tag("STELE-REPO2", body, out, cap);
+    n += m;
+    char digest[STELE_DIGEST_HEX + 1] = "";
+    if (stele_repo_ad_is_team(ad) && stele_release_digest(ad->release_auth, digest) != 0)
+        return 0;
+    m = snprintf(body + n, sizeof(body) - (size_t)n, "|%s|%s", ad->polity, digest);
+    if (m < 0 || (size_t)m >= sizeof(body) - (size_t)n)
+        return 0;
+    if (ad->version == 3)
+        return _with_tag("STELE-REPO3", body, out, cap);
+    n += m;
+    m = snprintf(body + n, sizeof(body) - (size_t)n, "|%s", ad->provides);
+    if (m < 0 || (size_t)m >= sizeof(body) - (size_t)n)
+        return 0;
+    return _with_tag("STELE-REPO4", body, out, cap);
 }
 
 size_t stele_attestation_canonical(const stele_attestation_t *at, uint8_t *out,
@@ -193,7 +277,7 @@ size_t stele_attestation_canonical(const stele_attestation_t *at, uint8_t *out,
                      (long long)at->ts);
     if (n < 0 || (size_t)n >= sizeof(body))
         return 0;
-    if (at->version != 2 && at->version != 3)
+    if (at->version != 2 && at->version != 3 && at->version != 4)
         return _with_tag("STELE-ATTEST", body, out, cap);
     int m = snprintf(body + n, sizeof(body) - (size_t)n, "|%s|%s", at->channel,
                      at->scope);
@@ -202,6 +286,14 @@ size_t stele_attestation_canonical(const stele_attestation_t *at, uint8_t *out,
     if (at->version == 2)
         return _with_tag("STELE-ATTEST2", body, out, cap);
     n += m;
+    if (at->version == 4)
+    {
+        m = snprintf(body + n, sizeof(body) - (size_t)n, "|%s|%s", at->attributes,
+                     at->guardian_of);
+        if (m < 0 || (size_t)m >= sizeof(body) - (size_t)n)
+            return 0;
+        return _with_tag("STELE-ATTEST4", body, out, cap);
+    }
     m = snprintf(body + n, sizeof(body) - (size_t)n, "|%s", at->replicates);
     if (m < 0 || (size_t)m >= sizeof(body) - (size_t)n)
         return 0;
@@ -303,12 +395,19 @@ json_t *stele_repo_ad_to_json(const stele_repo_ad_t *ad, const char *sig_hex)
                           "sig", sig_hex != NULL ? sig_hex : "");
     if (o != NULL && _v2(ad->version))
     {
-        json_object_set_new(o, "v", json_integer(2));
+        json_object_set_new(o, "v", json_integer(ad->version));
         json_object_set_new(o, "description", json_string(ad->description));
         json_object_set_new(o, "topics", json_string(ad->topics));
         json_object_set_new(o, "sbom_digest", json_string(ad->sbom_digest));
         json_object_set_new(o, "sbom_path", json_string(ad->sbom_path));
         json_object_set_new(o, "claim_verdict", json_string(ad->claim_verdict));
+        if (ad->version >= 3)
+        {
+            json_object_set_new(o, "polity", json_string(ad->polity));
+            json_object_set_new(o, "release_auth", json_string(ad->release_auth));
+        }
+        if (ad->version == 4)
+            json_object_set_new(o, "provides", json_string(ad->provides));
     }
     return o;
 }
@@ -351,7 +450,12 @@ int stele_repo_ad_from_json(const json_t *obj, stele_repo_ad_t *ad,
     json_t *v = json_object_get((json_t *)obj, "v");
     if (v != NULL)
     {
-        if (!json_is_integer(v) || json_integer_value(v) != 2
+        json_int_t ver = json_is_integer(v) ? json_integer_value(v) : 0;
+        if ((ver != 2 && ver != 3 && ver != 4)
+            || (ver >= 3 && (!_take(obj, "polity", ad->polity, sizeof(ad->polity))
+                             || !_take(obj, "release_auth", ad->release_auth,
+                                       sizeof(ad->release_auth))))
+            || (ver == 4 && !_take(obj, "provides", ad->provides, sizeof(ad->provides)))
             || !_take(obj, "description", ad->description, sizeof(ad->description))
             || !_take(obj, "topics", ad->topics, sizeof(ad->topics))
             || !_take(obj, "sbom_digest", ad->sbom_digest, sizeof(ad->sbom_digest))
@@ -359,7 +463,7 @@ int stele_repo_ad_from_json(const json_t *obj, stele_repo_ad_t *ad,
             || !_take(obj, "claim_verdict", ad->claim_verdict,
                       sizeof(ad->claim_verdict)))
             return -1;
-        ad->version = 2;
+        ad->version = (int)ver;
     }
     return stele_repo_ad_valid(ad) ? 0 : -1;
 }
@@ -377,13 +481,18 @@ json_t *stele_attestation_to_json(const stele_attestation_t *at, const char *sig
                           "verdict", at->verdict, "count", (json_int_t)at->count,
                           "max_severity", at->max_severity, "ts", (json_int_t)at->ts,
                           "sig", sig_hex != NULL ? sig_hex : "");
-    if (o != NULL && (at->version == 2 || at->version == 3))
+    if (o != NULL && at->version >= 2 && at->version <= 4)
     {
         json_object_set_new(o, "v", json_integer(at->version));
         json_object_set_new(o, "channel", json_string(at->channel));
         json_object_set_new(o, "scope", json_string(at->scope));
         if (at->version == 3)
             json_object_set_new(o, "replicates", json_string(at->replicates));
+        if (at->version == 4)
+        {
+            json_object_set_new(o, "attributes", json_string(at->attributes));
+            json_object_set_new(o, "guardian_of", json_string(at->guardian_of));
+        }
     }
     return o;
 }
@@ -414,11 +523,15 @@ int stele_attestation_from_json(const json_t *obj, stele_attestation_t *at,
     if (v != NULL)
     {
         json_int_t ver = json_is_integer(v) ? json_integer_value(v) : 0;
-        if ((ver != 2 && ver != 3)
+        if (ver < 2 || ver > 4
             || !_take(obj, "channel", at->channel, sizeof(at->channel))
             || !_take(obj, "scope", at->scope, sizeof(at->scope))
             || (ver == 3 && !_take(obj, "replicates", at->replicates,
-                                   sizeof(at->replicates))))
+                                   sizeof(at->replicates)))
+            || (ver == 4 && (!_take(obj, "attributes", at->attributes,
+                                    sizeof(at->attributes))
+                             || !_take(obj, "guardian_of", at->guardian_of,
+                                       sizeof(at->guardian_of)))))
             return -1;
         at->version = (int)ver;
     }

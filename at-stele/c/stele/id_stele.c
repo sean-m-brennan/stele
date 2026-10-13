@@ -26,6 +26,7 @@
 
 #include <dirent.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -51,24 +52,30 @@
 
 #include "at_stele.h"
 #include "stele_codec.h"
+#include "stele_team.h"
+#include "stele_relay.h"
 #include "id_stele.h"
 
 static char ID_STELE_REPO[]   = "stele repo";
 static char ID_STELE_ATTEST[] = "stele attest";
 static char ID_STELE_REBUT[]  = "stele rebut";
+static char ID_STELE_TEAM[]   = "stele team";
 static char ID_APP_ADVERTISE[] = AT_APP_STELE_ADVERTISE_REPO;
 static char ID_APP_ATTEST[]    = AT_APP_STELE_ATTEST;
 static char ID_APP_REBUT[]     = AT_APP_STELE_REBUT;
+static char ID_APP_PUBLISH_TEAM[] = AT_APP_STELE_PUBLISH_TEAM;
 
 AT_APP_VERB_REGISTER(stele_advertise_repo, AT_APP_STELE_ADVERTISE_REPO, "identity")
 AT_APP_VERB_REGISTER(stele_attest,         AT_APP_STELE_ATTEST,         "identity")
 AT_APP_VERB_REGISTER(stele_rebut,          AT_APP_STELE_REBUT,          "identity")
+AT_APP_VERB_REGISTER(stele_publish_team,   AT_APP_STELE_PUBLISH_TEAM,   "identity")
 
 /* In memory, the newest of each. The store on disk (below) is the record. */
 #define STELE_ADS_CAP     256
 #define STELE_ATTEST_CAP  256
 #define STELE_REBUT_CAP   256
 #define STELE_SCORES_CAP  64
+#define STELE_TEAMS_CAP   16
 
 /* ---------------- the app event ---------------- */
 
@@ -89,7 +96,7 @@ AT_MSG_TYPE_REGISTER(stele_event, STELE_EVENT, &stele_event_vt)
 static bool _is_stele_kind(int32_t kind)
 {
     return kind >= AT_APP_EVENT_STELE_AD_HELD
-        && kind <= AT_APP_EVENT_STELE_REBUTTAL_HELD;
+        && kind <= AT_APP_EVENT_STELE_TEAM_HELD;
 }
 
 static int _decode_stele(const generic_msg_t *msg, at_app_event_t *ev)
@@ -123,9 +130,23 @@ static void _emit(const process_t *proc, int32_t kind, const at_app_stele_t *d)
                   AT_SEND_NOW, NULL, NULL, 0);
 }
 
+/* Who answers for a team ad (Phase 3), fixed when the ad is first attributed
+ * and never undone: a later roster narrows who is on the team from then on,
+ * not what the team has already shipped. */
+typedef struct {
+    bool team;
+    char polity[STELE_PK_HEX + 1];          /* the team's root key, hex */
+    char polity_did[STELE_DID_MAX + 1];
+    char officer[STELE_DID_MAX + 1];
+    char built_by[STELE_DID_MAX + 1];       /* "" for none */
+    char guardian[STELE_DID_MAX + 1];       /* "" for none */
+    char guardian_uuid[STELE_UUID_STR];     /* "" for none */
+} stele_attribution_t;
+
 typedef struct {
     stele_repo_ad_t ad;
     char id[STELE_ID_HEX + 1];
+    stele_attribution_t attr;
 } held_ad_t;
 
 typedef struct {
@@ -150,6 +171,8 @@ static struct {
     stele_score_sent_t scores[STELE_SCORES_CAP];
     size_t             n_scores;
     int64_t            ad_seq;
+    stele_team_t       teams[STELE_TEAMS_CAP];   /* the newest roster per team */
+    size_t             n_teams;
 } st = { .lock = PTHREAD_MUTEX_INITIALIZER };
 
 static void _stele_reset(void)
@@ -160,6 +183,7 @@ static void _stele_reset(void)
     st.n_rb = st.next_rb = 0;
     st.n_scores = 0;
     st.ad_seq = 0;
+    st.n_teams = 0;
     st.initialized = true;
     pthread_mutex_unlock(&st.lock);
 }
@@ -198,9 +222,22 @@ static void _store(const char *kind, const char *id, json_t *env)
         log_debug(NULL, "Identity: stele: could not keep %s/%.12s\n", kind, id);
 }
 
+/* Keep @p env as <kind>/<id>.json, replacing what was there: a team's newest
+ * roster replaces its last. */
+static void _store_replace(const char *kind, const char *id, json_t *env)
+{
+    char path[600];
+    if (env == NULL || _store_path(kind, id, path, sizeof(path)) != 0)
+        return;
+    (void)unlink(path);
+    _store(kind, id, env);
+}
+
 static bool _hold_ad(const stele_repo_ad_t *ad, const char *id);
 static bool _hold_attestation(const stele_attestation_t *at, const char *id);
 static bool _hold_rebuttal(const stele_rebuttal_t *rb, const char *id);
+static bool _hold_team(const stele_team_t *t);
+static void _load_attribution(const char *ad_id, json_t *env);
 
 /* Reload what an earlier run kept, so a restarted node still holds the ads its
  * verbs need and the artifacts it announced. The files are this node's own
@@ -240,12 +277,26 @@ static void _load_kind(const char *kind)
                 && stele_attestation_id(&at, id) == 0)
                 (void)_hold_attestation(&at, id);
         }
-        else
+        else if (strcmp(kind, "rebuttals") == 0)
         {
             stele_rebuttal_t rb;
             if (stele_rebuttal_from_json(env, &rb, sig) == 0
                 && stele_rebuttal_id(&rb, id) == 0)
                 (void)_hold_rebuttal(&rb, id);
+        }
+        else if (strcmp(kind, "teams") == 0)
+        {
+            stele_team_t *t = malloc(sizeof(*t));
+            if (t != NULL
+                && stele_team_parse(json_string_value(json_object_get(env, "roster")), t) == 0)
+                (void)_hold_team(t);
+            free(t);
+        }
+        else
+        {
+            char ad_id[STELE_ID_HEX + 1];
+            snprintf(ad_id, sizeof(ad_id), "%.*s", STELE_ID_HEX, e->d_name);
+            _load_attribution(ad_id, env);
         }
         json_decref(env);
     }
@@ -258,6 +309,8 @@ static void _stele_init(void)
     _load_kind("ads");
     _load_kind("attestations");
     _load_kind("rebuttals");
+    _load_kind("teams");
+    _load_kind("attributions");   /* after the ads they are about */
 }
 
 /* Store an ad by id (a ring; a repeat is a no-op). True when it was new. */
@@ -273,6 +326,7 @@ static bool _hold_ad(const stele_repo_ad_t *ad, const char *id)
     held_ad_t *slot = &st.ads[st.next_ad];
     slot->ad = *ad;
     snprintf(slot->id, sizeof(slot->id), "%s", id);
+    memset(&slot->attr, 0, sizeof(slot->attr));   /* a ring slot is reused */
     st.next_ad = (st.next_ad + 1) % STELE_ADS_CAP;
     if (st.n_ads < STELE_ADS_CAP)
         st.n_ads++;
@@ -405,7 +459,9 @@ static void _rebuttal_held(const process_t *proc, const stele_rebuttal_t *rb,
     _emit(proc, AT_APP_EVENT_STELE_REBUTTAL_HELD, &d);
 }
 
-/* The newest held ad from @p owner at @p commit (highest seq), copied out. */
+/* The newest held ad from @p owner at @p commit (highest seq, then latest ts:
+ * an owner that re-advertises a commit at the same seq means its last ad),
+ * copied out. Mirrors Python's attest. */
 static bool _find_ad(const uuid_t owner, const char *commit, held_ad_t *out)
 {
     bool found = false;
@@ -414,7 +470,8 @@ static bool _find_ad(const uuid_t owner, const char *commit, held_ad_t *out)
     {
         const held_ad_t *h = &st.ads[i];
         if (uuid_compare(h->ad.owner, owner) == 0 && strcmp(h->ad.commit, commit) == 0
-            && (!found || h->ad.seq > out->ad.seq))
+            && (!found || h->ad.seq > out->ad.seq
+                || (h->ad.seq == out->ad.seq && h->ad.ts > out->ad.ts)))
         {
             *out = *h;
             found = true;
@@ -478,6 +535,355 @@ static void _submit_attested(const process_t *proc, const uuid_t subject,
     pthread_mutex_unlock(&st.lock);
 }
 
+/* ---------------- teams (Phase 3, stele_team.h) ---------------- */
+
+/* The held roster of the team @p issuer. Caller holds st.lock. */
+static stele_team_t *_team_locked(const char *issuer)
+{
+    for (size_t i = 0; i < st.n_teams; i++)
+        if (strcmp(st.teams[i].issuer, issuer) == 0)
+            return &st.teams[i];
+    return NULL;
+}
+
+/* Hold @p t when it is the team's first roster here or a higher seq. */
+static bool _hold_team(const stele_team_t *t)
+{
+    bool held = false;
+    pthread_mutex_lock(&st.lock);
+    stele_team_t *have = _team_locked(t->issuer);
+    if (have != NULL && have->seq < t->seq)
+    {
+        *have = *t;
+        held = true;
+    }
+    else if (have == NULL && st.n_teams < STELE_TEAMS_CAP)
+    {
+        st.teams[st.n_teams++] = *t;
+        held = true;
+    }
+    pthread_mutex_unlock(&st.lock);
+    return held;
+}
+
+/* AT's conflict set (AT ISSUES §2.54): every node each held team has EVER
+ * listed, so a teammate neither witnesses for nor counts toward an attestation
+ * about its team. Monotone, like attribution: a shorter roster must not turn a
+ * former teammate into an outsider, or certificates made while it was a
+ * teammate would fall short of the larger outside quorum everywhere they are
+ * re-checked, and the team could make a node an "outsider" for its own next
+ * release. The history is etc/stele/conflicts.json ({issuer: [uuid, ...]});
+ * AT re-reads its file when it changes. Failure is logged and swallowed. */
+static void _write_conflicts(void)
+{
+    char hist_path[600];
+    if (_store_path("conflicts", NULL, hist_path, sizeof(hist_path)) != 0)
+        return;
+    snprintf(hist_path + strlen(hist_path), sizeof(hist_path) - strlen(hist_path),
+             ".json");
+    json_t *hist = json_load_file(hist_path, 0, NULL);
+    if (!json_is_object(hist))
+    {
+        json_decref(hist);
+        hist = json_object();
+    }
+    pthread_mutex_lock(&st.lock);
+    for (size_t i = 0; i < st.n_teams; i++)
+    {
+        json_t *nodes = json_object_get(hist, st.teams[i].issuer);
+        if (!json_is_array(nodes))
+        {
+            nodes = json_array();
+            json_object_set_new(hist, st.teams[i].issuer, nodes);
+        }
+        for (size_t j = 0; j < st.teams[i].n_members; j++)
+        {
+            const char *u = st.teams[i].members[j].at_uuid;
+            bool have = false;
+            size_t k;
+            json_t *x;
+            json_array_foreach(nodes, k, x)
+                if (strcmp(json_string_value(x), u) == 0)
+                    have = true;
+            if (!have)
+                json_array_append_new(nodes, json_string(u));
+        }
+    }
+    pthread_mutex_unlock(&st.lock);
+    char tmp[620];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", hist_path);
+    if (json_dump_file(hist, tmp, JSON_INDENT(2) | JSON_SORT_KEYS) != 0
+        || rename(tmp, hist_path) != 0)
+        log_warn(NULL, "Identity: stele: could not keep the team history\n");
+    json_t *teams = json_array();
+    const char *issuer;
+    json_t *nodes;
+    json_object_foreach(hist, issuer, nodes)
+        json_array_append(teams, nodes);
+    json_decref(hist);
+    json_t *doc = json_pack("{s:o}", "teams", teams);
+    char cfg_dir[CFG_PATH_LEN + 1] = {0};
+    char path[CFG_PATH_LEN + 64], atmp[CFG_PATH_LEN + 72];
+    if (doc != NULL && get_cfg_dir(cfg_dir, sizeof(cfg_dir)) >= 0)
+    {
+        snprintf(path, sizeof(path), "%s/attest_conflicts.cfg.json", cfg_dir);
+        snprintf(atmp, sizeof(atmp), "%s.tmp", path);
+        if (json_dump_file(doc, atmp, JSON_INDENT(2)) != 0 || rename(atmp, path) != 0)
+            log_warn(NULL, "Identity: stele: could not write the attestation "
+                     "conflict set\n");
+    }
+    json_decref(doc);
+}
+
+/* The AT signing key this node holds for @p at_uuid: its own, or an admitted
+ * peer's. */
+static bool _key_of_node(const char *at_uuid, void *ctx,
+                         unsigned char pk[crypto_sign_PUBLICKEYBYTES])
+{
+    const process_t *proc = ctx;
+    uuid_t u;
+    if (proc == NULL || uuid_parse(at_uuid, u) != 0)
+        return false;
+    const identity_t *self = identity_self_identity(proc);
+    if (self != NULL && uuid_compare(self->uuid, u) == 0)
+    {
+        memcpy(pk, self->signature.public, crypto_sign_PUBLICKEYBYTES);
+        return true;
+    }
+    public_identity_t *pub = malloc(sizeof(*pub));
+    bool found = pub != NULL && identity_find_peer_pub(proc, u, pub);
+    if (found)
+        memcpy(pk, pub->signature.public, crypto_sign_PUBLICKEYBYTES);
+    free(pub);
+    return found;
+}
+
+static void _store_attribution(const char *ad_id, const stele_attribution_t *a)
+{
+    json_t *env = json_pack("{s:s, s:s, s:s, s:s, s:s, s:s}",
+                            "polity", a->polity, "polity_did", a->polity_did,
+                            "officer", a->officer, "built_by", a->built_by,
+                            "guardian", a->guardian, "guardian_uuid", a->guardian_uuid);
+    _store("attributions", ad_id, env);
+    json_decref(env);
+}
+
+/* An attribution this node fixed on an earlier run: its own record. */
+static void _load_attribution(const char *ad_id, json_t *env)
+{
+    stele_attribution_t a;
+    memset(&a, 0, sizeof(a));
+    const char *keys[] = {"polity", "polity_did", "officer", "built_by", "guardian",
+                          "guardian_uuid"};
+    char *dsts[] = {a.polity, a.polity_did, a.officer, a.built_by, a.guardian,
+                    a.guardian_uuid};
+    size_t caps[] = {sizeof(a.polity), sizeof(a.polity_did), sizeof(a.officer),
+                     sizeof(a.built_by), sizeof(a.guardian), sizeof(a.guardian_uuid)};
+    for (size_t i = 0; i < 6; i++)
+    {
+        const char *v = json_string_value(json_object_get(env, keys[i]));
+        if (v == NULL || strlen(v) >= caps[i])
+            return;
+        memcpy(dsts[i], v, strlen(v) + 1);
+    }
+    a.team = true;
+    pthread_mutex_lock(&st.lock);
+    for (size_t i = 0; i < st.n_ads; i++)
+        if (strcmp(st.ads[i].id, ad_id) == 0)
+            st.ads[i].attr = a;
+    pthread_mutex_unlock(&st.lock);
+}
+
+/* Who answers for the v3 ad @p ad, from a roster this node holds: true when
+ * the release authorization verifies, names this ad's repository and commit,
+ * is signed by an officer the team's roster lists with that key, and the ad's
+ * owner is that officer's node. Caller holds st.lock. */
+static bool _attribution_locked(const stele_repo_ad_t *ad, stele_attribution_t *out,
+                                char *why, size_t why_cap)
+{
+    memset(out, 0, sizeof(*out));
+    stele_release_t rel;
+    if (!stele_repo_ad_is_team(ad) || stele_release_parse(ad->release_auth, &rel) != 0)
+    {
+        snprintf(why, why_cap, "release authorization does not verify");
+        return false;
+    }
+    if (strcmp(rel.issuer, ad->polity) != 0 || strcmp(rel.url, ad->url) != 0
+        || strcmp(rel.commit, ad->commit) != 0 || strcmp(rel.repo, ad->name) != 0)
+    {
+        snprintf(why, why_cap, "release authorization is for another release");
+        return false;
+    }
+    const stele_team_t *t = _team_locked(ad->polity);
+    if (t == NULL)
+    {
+        snprintf(why, why_cap, "no roster held for team %.12s", ad->polity);
+        return false;
+    }
+    const stele_team_member_t *officer = stele_team_member(t, rel.officer);
+    char owner[STELE_UUID_STR];
+    uuid_unparse_lower(ad->owner, owner);
+    if (officer == NULL || !stele_team_is_officer(t, rel.officer)
+        || strcmp(officer->key, rel.officer_key) != 0)
+    {
+        snprintf(why, why_cap, "%.24s is not a release officer of the team", rel.officer);
+        return false;
+    }
+    if (strcmp(officer->at_uuid, owner) != 0)
+    {
+        snprintf(why, why_cap, "the ad's owner is not the officer's node");
+        return false;
+    }
+    out->team = true;
+    snprintf(out->polity, sizeof(out->polity), "%s", ad->polity);
+    snprintf(out->polity_did, sizeof(out->polity_did), "%s", t->polity);
+    snprintf(out->officer, sizeof(out->officer), "%s", rel.officer);
+    snprintf(out->built_by, sizeof(out->built_by), "%s", rel.built_by);
+    const char *g = rel.built_by[0] != '\0' ? stele_team_guardian_of(t, rel.built_by)
+                                            : NULL;
+    const stele_team_member_t *gm = g != NULL ? stele_team_member(t, g) : NULL;
+    if (gm != NULL)
+    {
+        snprintf(out->guardian, sizeof(out->guardian), "%s", g);
+        snprintf(out->guardian_uuid, sizeof(out->guardian_uuid), "%s", gm->at_uuid);
+    }
+    return true;
+}
+
+/* Attribute every held, not yet attributed v3 ad that the held rosters now
+ * account for. Once attributed, an ad stays the team's. */
+static void _attribute_held(const process_t *proc)
+{
+    for (size_t i = 0;; i++)
+    {
+        stele_attribution_t a;
+        char why[128] = {0}, id[STELE_ID_HEX + 1] = {0};
+        stele_repo_ad_t ad;
+        bool done = false, got = false;
+        pthread_mutex_lock(&st.lock);
+        if (i >= st.n_ads)
+            done = true;
+        else if (!st.ads[i].attr.team && stele_repo_ad_is_team(&st.ads[i].ad))
+        {
+            got = _attribution_locked(&st.ads[i].ad, &a, why, sizeof(why));
+            if (got)
+                st.ads[i].attr = a;
+            ad = st.ads[i].ad;
+            snprintf(id, sizeof(id), "%s", st.ads[i].id);
+        }
+        pthread_mutex_unlock(&st.lock);
+        if (done)
+            break;
+        if (got)
+        {
+            _store_attribution(id, &a);
+            log_info(proc != NULL ? proc->logger : NULL,
+                     "Identity: stele team release %s@%.12s by %.24s (team %.12s%s%s)\n",
+                     ad.name, ad.commit, a.officer, a.polity,
+                     a.guardian[0] != '\0' ? ", guardian " : "",
+                     a.guardian[0] != '\0' ? a.guardian_uuid : "");
+        }
+        else if (id[0] != '\0' && stele_repo_ad_is_team(&ad))
+            log_debug(proc != NULL ? proc->logger : NULL,
+                      "Identity: stele ad %.12s is not yet a team release: %s\n", id, why);
+    }
+}
+
+/* Verify, hold, keep, announce and apply a roster; true when it was new. The
+ * roster is held only when its root signature and every member's consent
+ * verify, and when @p must_list (a node's uuid) is one of its members. */
+static bool _take_team(const process_t *proc, const char *text, const char *must_list,
+                       const char *from)
+{
+    stele_team_t *t = malloc(sizeof(*t));
+    if (t == NULL)
+        return false;
+    bool held = false;
+    char bad[STELE_UUID_STR] = {0};
+    if (stele_team_parse(text, t) != 0)
+        log_warn(proc->logger, "Identity: stele team roster from %s does not verify, "
+                 "refusing\n", from);
+    else if (stele_team_member_by_uuid(t, must_list) == NULL)
+        log_warn(proc->logger, "Identity: stele team roster from %s does not list its "
+                 "sender; rosters are never relayed, refusing\n", from);
+    else if (!stele_team_consents_ok(t, _key_of_node, (void *)proc, bad))
+        log_warn(proc->logger, "Identity: stele team roster from %s lists %.8s without "
+                 "that node's consent, refusing\n", from, bad);
+    else if (_hold_team(t))
+    {
+        held = true;
+        json_t *env = json_pack("{s:s}", "roster", text);
+        _store_replace("teams", t->issuer, env);
+        json_decref(env);
+        _write_conflicts();
+        at_app_stele_t d;
+        memset(&d, 0, sizeof(d));
+        snprintf(d.id, sizeof(d.id), "%s", t->issuer);
+        snprintf(d.name, sizeof(d.name), "%s", t->polity);
+        d.ts = t->seq;
+        _emit(proc, AT_APP_EVENT_STELE_TEAM_HELD, &d);
+        log_info(proc->logger, "Identity: stele team %.12s roster seq %lld from %s "
+                 "(%zu members)\n", t->issuer, (long long)t->seq, from, t->n_members);
+        _attribute_held(proc);
+    }
+    free(t);
+    return held;
+}
+
+static bool handle_stele_team(const process_t *proc, directory_t *queues,
+                              generic_msg_t *msg)
+{
+    (void)queues;
+    net_msg_t *nmsg = &msg->info.net_msg;
+    json_t *payload = NULL;
+    if (net_msg_unpack_json(nmsg, &payload) != 0 || payload == NULL)
+        return true;
+    char sender[STELE_UUID_STR];
+    uuid_unparse_lower(nmsg->from_whom.uuid, sender);
+    (void)_take_team(proc, json_string_value(json_object_get(payload, "roster")),
+                     sender, nmsg->from_whom.nickname);
+    json_decref(payload);
+    return true;
+}
+
+static bool handle_app_stele_publish_team(const process_t *proc, directory_t *queues,
+                                          generic_msg_t *msg)
+{
+    (void)queues;
+    net_msg_t *nmsg = &msg->info.net_msg;
+    if (!identity_is_local_app_verb(proc, nmsg))
+        return identity_refuse_remote_app_verb(proc, nmsg, AT_APP_STELE_PUBLISH_TEAM);
+    const identity_t *self = identity_self_identity(proc);
+    json_t *p = NULL;
+    if (self == NULL || net_msg_unpack_json(nmsg, &p) != 0 || p == NULL)
+        return true;
+    const char *text = json_string_value(json_object_get(p, "roster"));
+    char me[STELE_UUID_STR];
+    uuid_unparse_lower(self->uuid, me);
+    /* Held here first, so a roster this node cannot verify never goes out. A
+     * roster already held is sent again: a member that joined since needs it. */
+    (void)_take_team(proc, text, me, "this node");
+    stele_team_t *t = malloc(sizeof(*t));
+    bool mine = false;
+    if (t != NULL && stele_team_parse(text, t) == 0)
+    {
+        pthread_mutex_lock(&st.lock);
+        stele_team_t *have = _team_locked(t->issuer);
+        mine = have != NULL && have->seq == t->seq
+            && stele_team_member_by_uuid(have, me) != NULL;
+        pthread_mutex_unlock(&st.lock);
+    }
+    free(t);
+    if (mine)
+    {
+        json_t *env = json_pack("{s:s}", "roster", text);
+        _multicast(proc, ID_STELE_TEAM, env, "a stele team roster");
+        json_decref(env);
+    }
+    json_decref(p);
+    return true;
+}
+
 /* ---------------- wire: stele repo ---------------- */
 
 static bool handle_stele_repo(const process_t *proc, directory_t *queues,
@@ -520,6 +926,8 @@ static bool handle_stele_repo(const process_t *proc, directory_t *queues,
         _ad_held(proc, &ad, id, sig);
         log_info(proc->logger, "Identity: stele repo %s@%.12s from %s (ad %.12s)\n",
                  ad.name, ad.commit, nmsg->from_whom.nickname, id);
+        if (stele_repo_ad_is_team(&ad))
+            _attribute_held(proc);
     }
     return true;
 }
@@ -655,6 +1063,19 @@ static bool handle_app_stele_advertise_repo(const process_t *proc,
         ad.sbom_path[0] = '\0';
     if (!_str(p, "claim_verdict", ad.claim_verdict, sizeof(ad.claim_verdict)))
         snprintf(ad.claim_verdict, sizeof(ad.claim_verdict), "%s", STELE_CLAIM_NONE);
+    /* Version 3: a team release, with the officer's authorization. */
+    if (json_object_get(p, "polity") != NULL || json_object_get(p, "release_auth") != NULL)
+    {
+        ad.version = 3;
+        ok = ok && _str(p, "polity", ad.polity, sizeof(ad.polity))
+            && _str(p, "release_auth", ad.release_auth, sizeof(ad.release_auth));
+    }
+    /* Version 4: the package the repo publishes as (solo or team). */
+    if (json_object_get(p, "provides") != NULL)
+    {
+        ad.version = 4;
+        ok = ok && _str(p, "provides", ad.provides, sizeof(ad.provides));
+    }
     json_t *js = json_object_get(p, "seq");
     pthread_mutex_lock(&st.lock);
     ad.seq = json_is_integer(js) ? (int64_t)json_integer_value(js) : ++st.ad_seq;
@@ -669,7 +1090,11 @@ static bool handle_app_stele_advertise_repo(const process_t *proc,
         return true;
     }
     if (_hold_ad(&ad, id))   /* our own, so a loopback copy is a no-op */
+    {
         _ad_held(proc, &ad, id, sig);
+        if (stele_repo_ad_is_team(&ad))
+            _attribute_held(proc);
+    }
     json_t *env = stele_repo_ad_to_json(&ad, sig);
     if (env != NULL)
     {
@@ -679,6 +1104,75 @@ static bool handle_app_stele_advertise_repo(const process_t *proc,
     log_info(proc->logger, "Identity: advertised stele repo %s@%.12s (ad %.12s)\n",
              ad.name, ad.commit, id);
     return true;
+}
+
+/* Land the held finding @p attributes on the guardian of the machine that
+ * built its team release: a v4 attestation restating the finding, about the
+ * same ad, scored STELE_SCORE_GUARDIAN against the guardian's node. Refused
+ * unless the ad is a team release this node attributed with a guardian. */
+static void _attest_guardian(const process_t *proc, const identity_t *self,
+                             const char *attributes)
+{
+    held_attestation_t orig;
+    held_ad_t held;
+    if (attributes == NULL || !_find_attestation(attributes, &orig)
+        || !_find_ad_by_id(orig.at.repo_ad_id, &held))
+    {
+        log_warn(proc->logger, "Identity: stele attest: attributes %.12s, which is "
+                 "not a held attestation; refusing\n", attributes ? attributes : "");
+        return;
+    }
+    if (strcmp(orig.at.verdict, STELE_VERDICT_VULN) != 0 || orig.at.version == 4)
+    {
+        log_warn(proc->logger, "Identity: stele attest: only a finding is attributed "
+                 "to a guardian; refusing\n");
+        return;
+    }
+    uuid_t guardian;
+    if (!held.attr.team || held.attr.guardian_uuid[0] == '\0'
+        || uuid_parse(held.attr.guardian_uuid, guardian) != 0)
+    {
+        log_warn(proc->logger, "Identity: stele attest: %s@%.12s is not a team "
+                 "release built by a guarded machine; refusing\n", held.ad.name,
+                 held.ad.commit);
+        return;
+    }
+    if (uuid_compare(guardian, self->uuid) == 0)
+    {
+        log_warn(proc->logger, "Identity: stele attest: a guardian does not attest "
+                 "itself; refusing\n");
+        return;
+    }
+    stele_attestation_t at = orig.at;
+    at.version = 4;
+    snprintf(at.channel, sizeof(at.channel), "%s", STELE_CHANNEL_PROBE);
+    at.replicates[0] = '\0';
+    snprintf(at.attributes, sizeof(at.attributes), "%s", attributes);
+    snprintf(at.guardian_of, sizeof(at.guardian_of), "%s", held.attr.built_by);
+    snprintf(at.repo_ad_id, sizeof(at.repo_ad_id), "%s", held.id);
+    if (stele_scope(guardian, held.ad.name, at.commit, at.scanner, at.scope) != 0)
+        return;
+    uuid_copy(at.verifier, self->uuid);
+    at.ts = (int64_t)time(NULL);
+    char sig[STELE_SIG_HEX + 1], digest[STELE_ID_HEX + 1];
+    if (stele_attestation_sign(&at, self->signature.private, sig) != 0
+        || stele_attestation_id(&at, digest) != 0)
+    {
+        log_warn(proc->logger, "Identity: stele attest (guardian) invalid, refusing\n");
+        return;
+    }
+    if (_hold_attestation(&at, digest))
+        _attestation_held(proc, &at, digest, sig);
+    json_t *env = stele_attestation_to_json(&at, sig);
+    if (env != NULL)
+    {
+        _multicast(proc, ID_STELE_ATTEST, env, "a stele attestation");
+        json_decref(env);
+    }
+    _submit_attested(proc, guardian, STELE_SCORE_GUARDIAN, digest, at.channel, at.scope);
+    log_info(proc->logger, "Identity: attested %s@%.12s to the guardian %.8s of %.24s, "
+             "evidence %.12s\n", held.ad.name, at.commit, held.attr.guardian_uuid,
+             held.attr.built_by, digest);
 }
 
 static bool handle_app_stele_attest(const process_t *proc, directory_t *queues,
@@ -692,6 +1186,12 @@ static bool handle_app_stele_attest(const process_t *proc, directory_t *queues,
     json_t *p = NULL;
     if (self == NULL || net_msg_unpack_json(nmsg, &p) != 0 || p == NULL)
         return true;
+    if (json_object_get(p, "attributes") != NULL)
+    {
+        _attest_guardian(proc, self, json_string_value(json_object_get(p, "attributes")));
+        json_decref(p);
+        return true;
+    }
     char owner_str[STELE_UUID_STR] = {0};
     stele_attestation_t at;
     memset(&at, 0, sizeof(at));
@@ -783,7 +1283,18 @@ static bool handle_app_stele_attest(const process_t *proc, directory_t *queues,
     double score = finding ? STELE_SCORE_FINDING : STELE_SCORE_CLEAN;
     if (strcmp(at.channel, STELE_CHANNEL_CERTIFICATE) == 0)
     {
-        if (held.ad.version != 2 || held.ad.sbom_digest[0] == '\0')
+        /* A provides check answers the ad's package claim; every other
+         * certificate checks the SBOM the ad carries. */
+        if (strcmp(at.scanner, STELE_SCANNER_PROVIDES) == 0)
+        {
+            if (held.ad.version != 4 || held.ad.provides[0] == '\0')
+            {
+                log_warn(proc->logger, "Identity: stele attest: a provides check needs "
+                         "an ad that names a package; refusing\n");
+                return true;
+            }
+        }
+        else if (held.ad.version < 2 || held.ad.sbom_digest[0] == '\0')
         {
             log_warn(proc->logger, "Identity: stele attest: a certificate needs an "
                      "ad that carries an SBOM; refusing\n");
@@ -792,7 +1303,7 @@ static bool handle_app_stele_attest(const process_t *proc, directory_t *queues,
     }
     else if (strcmp(at.channel, STELE_CHANNEL_SELF_CONSISTENCY) == 0)
     {
-        if (held.ad.version != 2
+        if (held.ad.version < 2
             || strcmp(held.ad.claim_verdict, STELE_VERDICT_CLEAN) != 0 || !finding)
         {
             log_warn(proc->logger, "Identity: stele attest: self_consistency needs "
@@ -893,6 +1404,9 @@ static int _stele_register(process_t *proc, const char *proc_name)
     process_register_handler(proc, ID_APP_ATTEST, (handler_ptr_t)handle_app_stele_attest);
     process_register_handler(proc, ID_STELE_REBUT, (handler_ptr_t)handle_stele_rebut);
     process_register_handler(proc, ID_APP_REBUT, (handler_ptr_t)handle_app_stele_rebut);
+    process_register_handler(proc, ID_STELE_TEAM, (handler_ptr_t)handle_stele_team);
+    process_register_handler(proc, ID_APP_PUBLISH_TEAM,
+                             (handler_ptr_t)handle_app_stele_publish_team);
     return 0;
 }
 
@@ -913,6 +1427,7 @@ AT_EXTENSION_REGISTER(stele, &stele_extension)
 
 void at_stele_link(void)
 {
+    stele_relay_link();   /* the discovery relay's network glue (Phase 4) */
 }
 
 /* ---------------- observability (tests, conformance) ---------------- */
@@ -925,9 +1440,17 @@ json_t *stele_held_ads_json(void)
     {
         char owner[STELE_UUID_STR];
         uuid_unparse_lower(st.ads[i].ad.owner, owner);
-        json_array_append_new(arr, json_pack("{s:s, s:s, s:s, s:s}",
+        json_t *o = json_pack("{s:s, s:s, s:s, s:s}",
             "owner", owner, "name", st.ads[i].ad.name,
-            "commit", st.ads[i].ad.commit, "id", st.ads[i].id));
+            "commit", st.ads[i].ad.commit, "id", st.ads[i].id);
+        if (o != NULL && st.ads[i].attr.team)
+        {
+            const stele_attribution_t *a = &st.ads[i].attr;
+            json_object_set_new(o, "team", json_pack("{s:s, s:s, s:s, s:s}",
+                "polity", a->polity, "officer", a->officer,
+                "guardian", a->guardian, "guardian_uuid", a->guardian_uuid));
+        }
+        json_array_append_new(arr, o);
     }
     pthread_mutex_unlock(&st.lock);
     return arr;
@@ -992,4 +1515,34 @@ void stele_hold_ad_for_test(const stele_repo_ad_t *ad)
     char id[STELE_ID_HEX + 1];
     if (stele_repo_ad_id(ad, id) == 0)
         _hold_ad(ad, id);
+}
+
+json_t *stele_held_teams_json(void)
+{
+    json_t *arr = json_array();
+    pthread_mutex_lock(&st.lock);
+    for (size_t i = 0; arr != NULL && i < st.n_teams; i++)
+    {
+        json_t *nodes = json_array();
+        for (size_t j = 0; j < st.teams[i].n_members; j++)
+            json_array_append_new(nodes, json_string(st.teams[i].members[j].at_uuid));
+        json_array_append_new(arr, json_pack("{s:s, s:I, s:o}",
+            "issuer", st.teams[i].issuer, "seq", (json_int_t)st.teams[i].seq,
+            "nodes", nodes));
+    }
+    pthread_mutex_unlock(&st.lock);
+    return arr;
+}
+
+void stele_hold_team_for_test(const char *text)
+{
+    stele_team_t *t = malloc(sizeof(*t));
+    if (t != NULL && stele_team_parse(text, t) == 0)
+        (void)_hold_team(t);
+    free(t);
+}
+
+void stele_attribute_held_for_test(void)
+{
+    _attribute_held(NULL);
 }

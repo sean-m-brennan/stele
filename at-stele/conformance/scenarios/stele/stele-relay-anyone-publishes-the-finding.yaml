@@ -1,0 +1,95 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-relay-anyone-publishes-the-finding
+byte_pinning: false
+description: |
+    A discovery relay indexes what anyone publishes, filed by content. The owner
+    publishes its ad and leaves the finding out; the verifier publishes the
+    finding. A search names the repository with the relay's own count beside it,
+    and a fetch hands back both, for the reader to verify.
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: relay
+
+steps:
+  - id: 1
+    from: alice
+    to: carol
+    function: trigger_stele_relay
+    payload:
+      as: alice
+      op: stl_publish
+      req:
+        items:
+          - kind: ad
+            about:
+                ad_owner: alice
+                name: demo
+                url: http://forge.local/alice/demo.git
+                v: 2
+                description: a library for demos
+                topics: go,demo
+    description: alice stl_publish.
+  - id: 2
+    from: bob
+    to: carol
+    function: trigger_stele_relay
+    payload:
+      as: bob
+      op: stl_publish
+      req:
+        items:
+          - kind: attestation
+            about:
+              verifier: bob
+              ad_owner: alice
+              name: demo
+              url: http://forge.local/alice/demo.git
+              v: 2
+              description: a library for demos
+              topics: go,demo
+              verdict: vuln
+              count: 2
+    description: bob stl_publish.
+  - id: 3
+    from: bob
+    to: carol
+    function: trigger_stele_relay
+    payload:
+      as: bob
+      op: stl_search
+      req:
+        q: demos
+    description: bob stl_search.
+  - id: 4
+    from: bob
+    to: carol
+    function: trigger_stele_relay
+    payload:
+      as: bob
+      op: stl_fetch
+      req:
+        url: http://forge.local/alice/demo.git
+    description: bob stl_fetch.
+
+expected_state:
+  carol:
+    stele_relay_replies:
+      - op: stl_published
+        accepted: 1
+      - op: stl_published
+        accepted: 1
+      - op: stl_results
+        results.#: 1
+        results.0.repo.name: demo
+        results.0.relay.findings: 1
+        results.0.relay.verifiers: 1
+      - op: stl_bundle
+        bundle.schema: stele-bundle-1
+        bundle.ads.#: 1
+        bundle.attestations.#: 1

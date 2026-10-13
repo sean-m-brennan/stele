@@ -1,0 +1,52 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attest-guardian-needs-a-guarded-builder
+byte_pinning: false
+description: |
+    No guardian attestation for a release no guarded machine built (Phase 3).
+
+    alice's release names no builder, so nobody but alice answers for it, and
+    she already does as the ad's owner. bob refuses to attribute the finding to
+    a guardian.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: owner
+  - id: dave
+    role: verifier
+
+fixtures:
+  stele_team:
+    members: [alice, carol]
+    officers: [alice]
+  stele_teams_held: [bob]
+  stele_attestations:
+    bob:
+      - verifier: dave
+        ad_owner: alice
+        team: true
+        verdict: vuln
+        count: 2
+
+steps:
+  - id: 1
+    from: bob
+    to: bob
+    function: trigger_stele_attest
+    payload:
+      attributes:
+        verifier: dave
+        ad_owner: alice
+        team: true
+        verdict: vuln
+        count: 2
+    description: bob tries to attribute a finding on an unbuilt release.
+
+expected_state:
+  bob:
+    stele_scores: []

@@ -26,7 +26,8 @@ function show(resp) {
     const hit = el('div', 'hit');
     hit.style.borderLeftColor = view.color;
     hit.append(el('div', 'name', st.repo.name + '  ' + view.title),
-               el('div', 'muted', st.repo.url || ''),
+               el('div', 'muted', (st.repo.url || '')
+                 + (view.profile ? '  (' + view.profile.name + ')' : '')),
                el('div', null, st.repo.description || ''));
     out.append(hit);
   }
@@ -40,6 +41,13 @@ q.addEventListener('input', () => {
 });
 
 chrome.storage.local.get({ port: 8099 }, got => { portBox.value = got.port; });
+/* The profile standings are read under (Phase 4); blank is the node's choice. */
+const profileBox = document.getElementById('profile');
+chrome.storage.local.get({ profile: '' }, got => { profileBox.value = got.profile; });
+profileBox.addEventListener('change', () => {
+  const p = profileBox.value.trim();
+  if (p === '' || /^[a-z0-9._-]{1,64}$/.test(p)) chrome.storage.local.set({ profile: p });
+});
 portBox.addEventListener('change', () => {
   const p = Number(portBox.value);
   if (Number.isInteger(p) && p > 0 && p < 65536) chrome.storage.local.set({ port: p });

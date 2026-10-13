@@ -1,0 +1,46 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-relay-unknown-refused
+byte_pinning: false
+description: |
+    A relay files only the kinds of claim it knows and answers only its ops.
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: relay
+
+steps:
+  - id: 1
+    from: alice
+    to: carol
+    function: trigger_stele_relay
+    payload:
+      as: alice
+      op: stl_publish
+      req:
+        items:
+          - kind: rumour
+            item: x
+    description: alice stl_publish.
+  - id: 2
+    from: alice
+    to: carol
+    function: trigger_stele_relay
+    payload:
+      as: alice
+      op: stl_forget
+      req:
+        q: demo
+    description: alice stl_forget.
+
+expected_state:
+  carol:
+    stele_relay_replies:
+      - accepted: 0
+        refused.0.reason: unknown_kind
+      - op: stl_refused
+        reason: unknown_op

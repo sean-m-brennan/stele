@@ -6,7 +6,24 @@
  * shape renders positive: state "verified-safe" with at least one check, every
  * check clean and every check confirmed by enough verifiers (Phase 2: no single
  * scanner is authoritative). Anything else, including no answer at all, is
- * unverified, unknown, single-source, aging, disputed or failing, never green. */
+ * unverified, unknown, single-source, aging, disputed or failing, never green.
+ *
+ * Phase 4: the node reads the standing under a PROFILE (viewer/stele_profile.py)
+ * and says which. A profile may set a check aside (ignored, or a finding below
+ * its severity floor), and that check is shown but not counted here either.
+ * What no profile relaxes is re-checked here: a counted finding is never green,
+ * a critical finding always counts, a required check that is absent is never
+ * green, and a standing with nothing counted is never green.
+ *
+ * Phase 4, the supply chain: the standing lists the repository's dependencies
+ * that resolve to repositories Stele reads. They are lines, never a reason for
+ * green. When the profile holds a repository to its worst dependency
+ * (`capped_by_deps`), the panel holds it there too.
+ *
+ * Phase 4, discovery relays: a repository from another AT group is verified
+ * only under the group anchor of a polity the reader follows, and the standing
+ * names it (`anchored_by`). A relay's own ranking is its word: shown, labelled,
+ * and never a reason for any level. */
 (function (root) {
   'use strict';
 
@@ -21,6 +38,43 @@
     unverified: { badge: '?', color: '#57606a', title: 'Unverified' },
   };
   const NOT_GREEN_WITH_A_FINDING = ['failing', 'failing-unconfirmed', 'disputed'];
+  /* Best to worst, as stele_view.STATE_ORDER. */
+  const ORDER = ['verified-safe', 'aging', 'single-source', 'unknown', 'disputed',
+                 'failing-unconfirmed', 'failing'];
+  function worse(a, b) {
+    return ORDER.indexOf(b) > ORDER.indexOf(a) ? b : a;
+  }
+
+  /* A finding's worst severity on one scale, as stele_profile.severity_rank:
+   * 0 low, 1 medium, 2 high, 3 critical, null unrated. */
+  const SEVERITY_LABELS = { LOW: 0, INFO: 0, MODERATE: 1, MEDIUM: 1, WARNING: 1,
+                            HIGH: 2, ERROR: 2, CRITICAL: 3 };
+  const CRITICAL = 3;
+  function severityRank(sev) {
+    const s = String(sev == null ? '' : sev).trim().toUpperCase();
+    if (!s) return null;
+    if (/^[0-9]+(\.[0-9]+)?$/.test(s)) {
+      const n = Number(s);
+      return n < 4 ? 0 : n < 7 ? 1 : n < 9 ? 2 : 3;
+    }
+    return Object.prototype.hasOwnProperty.call(SEVERITY_LABELS, s) ? SEVERITY_LABELS[s] : null;
+  }
+
+  /* Whether a check counts: unless the profile set it aside, and always when it
+   * holds a critical finding (no profile sets one aside). A check from a node
+   * that predates profiles has no `counted` and counts. */
+  function counts(c) {
+    if (c && c.verdict === 'vuln' && severityRank(c.max_severity) === CRITICAL) return true;
+    return !(c && c.counted === false);
+  }
+
+  /* The profile the node read the standing under, for the panel to name. */
+  function profileOf(standing) {
+    const p = standing && standing.profile;
+    if (!p || typeof p !== 'object' || typeof p.name !== 'string') return null;
+    return { name: p.name, source: String(p.source || ''),
+             issuer: typeof p.issuer === 'string' ? p.issuer : null };
+  }
 
   function days(seconds) {
     return Math.max(0, Math.floor(seconds / 86400));
@@ -39,24 +93,66 @@
         summary: 'Your node has not heard of this repository.' }, LEVELS.unknown);
     }
     const checks = Array.isArray(standing.checks) ? standing.checks : [];
+    const counted = checks.filter(counts);
     let level = standing.state;
     if (!LEVELS[level] || level === 'unverified') level = 'unknown';
-    const allClean = checks.length > 0 && checks.every(c => c.verdict === 'clean');
-    const allConfirmed = checks.every(c => c.state === 'confirmed-clean');
-    if (level === 'verified-safe' && !allClean) level = 'unknown';
+    const allClean = counted.length > 0 && counted.every(c => c.verdict === 'clean');
+    const allConfirmed = counted.every(c => c.state === 'confirmed-clean');
+    const missing = Array.isArray(standing.missing_required) ? standing.missing_required : [];
+    if (level === 'verified-safe' && (!allClean || missing.length)) level = 'unknown';
     if (level === 'verified-safe' && !allConfirmed) level = 'single-source';
-    if (!NOT_GREEN_WITH_A_FINDING.includes(level) && checks.some(c => c.verdict === 'vuln')) {
-      level = checks.some(c => c.state === 'confirmed-finding') ? 'failing'
-                                                                  : 'failing-unconfirmed';
+    if (!NOT_GREEN_WITH_A_FINDING.includes(level) && counted.some(c => c.verdict === 'vuln')) {
+      level = counted.some(c => c.state === 'confirmed-finding') ? 'failing'
+                                                                   : 'failing-unconfirmed';
+    }
+    // The supply chain: a cap the node applied holds here too, and never lifts.
+    const deps = standing.deps && typeof standing.deps === 'object' ? standing.deps : null;
+    const ownLevel = level;
+    if (deps && standing.capped_by_deps && ORDER.includes(deps.state)) {
+      level = worse(level, deps.state);
     }
 
-    const lines = checks.map(c => ({ text: c.reason || (c.scanner + ': ' + c.verdict),
-                                     rebuttal: c.rebuttal || null,
-                                     failing: c.verdict === 'vuln' }));
+    const lines = checks.map(c => {
+      const aside = !counts(c) && c.set_aside ? ' [set aside: ' + String(c.set_aside) + ']' : '';
+      return { text: (c.reason || (c.scanner + ': ' + c.verdict)) + aside,
+               rebuttal: c.rebuttal || null,
+               failing: c.verdict === 'vuln' && counts(c), set_aside: !!aside };
+    });
+    for (const m of missing) {
+      lines.push({ text: 'Required by the profile, never checked: ' + String(m),
+                   rebuttal: null, failing: false });
+    }
+    if (deps) {
+      for (const i of Array.isArray(deps.items) ? deps.items : []) {
+        if (!i || i.status !== 'resolved') continue;
+        const dl = LEVELS[i.state] && i.state !== 'unverified' ? i.state : 'unknown';
+        const from = (Array.isArray(i.claimants) ? i.claimants : [])
+          .filter(c => c && c.status === 'resolved')
+          .map(c => String(c.url || c.name || '?') + (c.via === 'pin' ? ', pinned by you' : ''));
+        lines.push({ text: 'Depends on ' + String(i.purl) + ': ' + LEVELS[dl].title
+                       + (from.length ? ' (' + from.join('; ') + ')' : ''),
+                     rebuttal: null, dep: true, failing: NOT_GREEN_WITH_A_FINDING.includes(dl) });
+      }
+      if (deps.unresolved > 0) {
+        lines.push({ text: String(deps.unresolved) + ' dependenc'
+                       + (deps.unresolved === 1 ? 'y' : 'ies')
+                       + ' Stele does not read (not on Stele, a version no release names, '
+                       + 'or a claim not confirmed); the OSV check covers their known '
+                       + 'vulnerabilities.', rebuttal: null, dep: true, failing: false });
+      }
+      if (deps.sbom === 'not-held') {
+        lines.push({ text: 'Your node does not hold the SBOM this release pins, so its '
+                       + 'dependencies are not listed.', rebuttal: null, dep: true,
+                     failing: false });
+      }
+    }
     let summary;
     const oldest = checks.length ? Math.min(...checks.map(c => c.ts || 0)) : 0;
     const asOf = standing.as_of || 0;
-    if (level === 'verified-safe') {
+    if (level !== ownLevel) {
+      summary = 'The profile holds this repository to its worst dependency, which is '
+        + LEVELS[level].title.toLowerCase() + '.';
+    } else if (level === 'verified-safe') {
       summary = 'Every check of the newest commit is clean, verified by your node '
         + '(last scanned ' + days(asOf - oldest) + ' day(s) ago).';
     } else if (level === 'aging') {
@@ -73,12 +169,89 @@
     } else if (level === 'single-source') {
       summary = 'Clean, but fewer independent verifiers agree than your node '
         + 'requires.';
+    } else if (missing.length) {
+      summary = 'A check the profile requires has never been run on the newest commit.';
+    } else if (checks.length && !counted.length) {
+      summary = 'Every check here is set aside by the profile, so nothing is counted.';
     } else if (Array.isArray(standing.earlier_commits) && standing.earlier_commits.length) {
       summary = 'The newest commit has not been verified; earlier commits were.';
     } else {
       summary = 'Nothing about this repository has been verified yet.';
     }
+    // A team release (Phase 3): the team it was released under, and the team's
+    // own standing, the worst of its repositories. Never a reason for green.
+    const team = standing.team;
+    if (team && typeof team === 'object') {
+      const tl = LEVELS[team.state] && team.state !== 'unverified' ? team.state : 'unknown';
+      lines.unshift({ text: 'Released by team ' + String(team.polity_did || team.polity || '?')
+                        + ' (officer ' + String(team.officer || '?') + '); team standing: '
+                        + LEVELS[tl].title,
+                      rebuttal: null, team: true,
+                      failing: NOT_GREEN_WITH_A_FINDING.includes(tl) });
+    }
+    // Another group's repository: whose word its keys and tiers are.
+    const anchored = standing.anchored_by;
+    if (anchored && typeof anchored === 'object') {
+      lines.unshift({ text: 'Another group, read under the anchor of '
+                        + String(anchored.polity || '?') + ' (' + String(anchored.tiers || '')
+                        + ')', rebuttal: null, anchor: true, failing: false });
+      const ck = standing.checkpoints;
+      if (ck && typeof ck === 'object' && ck.not_shown > 0) {
+        lines.push({ text: 'That group signed ' + ck.listed + ' checkpoint(s) since the first '
+                       + 'record shown; records came from ' + ck.with_records + '.',
+                     rebuttal: null, anchor: true, failing: false });
+      }
+    }
+    if (standing.reason === 'group not followed') {
+      lines.push({ text: 'Found through a relay, in a group whose polity you do not follow: '
+                     + 'nothing about it can be verified.', rebuttal: null, failing: false });
+    }
+    // The reading this is: the profile, and whose it is when followed.
+    const profile = profileOf(standing);
+    if (profile) {
+      summary += ' Read under ' + profile.name
+        + (profile.source === 'followed' && profile.issuer
+          ? ' (followed: ' + profile.issuer.slice(0, 12) + '…)' : '') + '.';
+    }
+    return Object.assign({ level, summary, lines, profile }, LEVELS[level]);
+  }
+
+  /* The same view for a TEAM's standing (viewer /team, /teams): the worst of its
+   * repositories, with every verified finding, the guardian's included, as a
+   * concern. Green only when every repository is verified-safe. */
+  function renderTeam(ts, error) {
+    if (ts == null || error) {
+      return Object.assign({ level: 'unverified', lines: [],
+        summary: error ? 'Your node did not answer: ' + error
+                       : 'Your node has not heard of this team.' }, LEVELS.unverified);
+    }
+    const repos = Array.isArray(ts.repos) ? ts.repos : [];
+    let level = LEVELS[ts.state] && ts.state !== 'unverified' ? ts.state : 'unknown';
+    if (level === 'verified-safe'
+        && !(repos.length > 0 && repos.every(r => r && r.state === 'verified-safe'))) {
+      level = 'unknown';
+    }
+    const concerns = (Array.isArray(ts.concerns) ? ts.concerns : []).filter(counts);
+    if (!NOT_GREEN_WITH_A_FINDING.includes(level) && concerns.length) {
+      level = 'failing-unconfirmed';
+    }
+    const members = ts.team && Array.isArray(ts.team.members) ? ts.team.members.length : 0;
+    const lines = concerns.map(c => ({ text: (c.repo ? c.repo + ': ' : '')
+                                         + (c.reason || (c.scanner + ': ' + c.verdict)),
+                                       rebuttal: c.rebuttal || null, failing: true }));
+    const summary = 'Team ' + String((ts.team && ts.team.polity) || '?') + ': ' + members
+      + ' member(s), ' + repos.length + ' repositor' + (repos.length === 1 ? 'y' : 'ies')
+      + '; the worst of them stands for the team.';
     return Object.assign({ level, summary, lines }, LEVELS[level]);
+  }
+
+  /* The organization a Forgejo or Gitea page belongs to, when the page is an
+   * organization's own (one path segment, and the server marked it as an
+   * organization page), else null. */
+  function orgOf(pathname, isOrgPage) {
+    const parts = String(pathname || '').split('/').filter(Boolean);
+    return isOrgPage && parts.length === 1 && /^[A-Za-z0-9._-]+$/.test(parts[0])
+      ? parts[0] : null;
   }
 
   function httpUrl(s) {
@@ -116,7 +289,30 @@
     return ['main', 'master'].map(b => web + '/raw/branch/' + b + '/.stele/standing.json');
   }
 
-  const api = { render, cloneUrl, candidates, bundleUrls, LEVELS };
+  /* One relay search result (viewer /relay/search): the reader's own standing
+   * when it verified one, else unverified; each relay's word is a line,
+   * labelled, and changes no level. */
+  function renderRelay(entry) {
+    const e = entry && typeof entry === 'object' ? entry : {};
+    const base = e.verified ? render(e.verified)
+      : Object.assign({ level: 'unverified', lines: [],
+          summary: e.reason === 'group not followed'
+            ? 'Found through a relay, in a group whose polity you do not follow.'
+            : 'Found through a relay; your node has not verified it yet.' },
+        LEVELS.unverified);
+    const lines = base.lines.slice();
+    for (const w of Array.isArray(e.relays) ? e.relays : []) {
+      lines.push({ text: 'The relay ' + String(w.relay || '?') + ' says: '
+                     + Number(w.findings || 0) + ' finding(s), ' + Number(w.clean || 0)
+                     + ' clean, ' + Number(w.verifiers || 0)
+                     + ' verifier(s). Its word, not verified.',
+                   rebuttal: null, relay: true, failing: false });
+    }
+    return Object.assign({}, base, { lines, repo: e.repo || null });
+  }
+
+  const api = { render, renderTeam, renderRelay, orgOf, cloneUrl, candidates, bundleUrls,
+                LEVELS, severityRank, counts, profileOf };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.stelePanel = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

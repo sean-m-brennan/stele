@@ -1,0 +1,41 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-team-roster-without-consent-refused
+byte_pinning: false
+description: |
+    A roster that lists a node without that node's consent is refused (Phase 3).
+
+    The root key alone cannot put a node on the team. Here it lists dave, an
+    outside auditor, with a "consent" alice signed. If bob believed it, dave
+    would become a teammate of alice in AT's conflict set, and his signature
+    would stop counting toward attestations about her team: the auditor
+    expelled without being expelled. dave's consent does not verify under
+    dave's key, so bob refuses the whole roster.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: dave
+    role: verifier
+
+fixtures:
+  stele_team:
+    members: [alice, dave]
+    officers: [alice]
+    consent_by:
+      dave: alice
+
+steps:
+  - id: 1
+    from: alice
+    to: bob
+    function: stele team
+    payload: {}
+    description: alice claims dave as her teammate.
+
+expected_state:
+  bob:
+    stele_teams_held: 0

@@ -22,8 +22,28 @@ async function port() {
   }
 }
 
+/* The profile to read standings under (Phase 4): blank leaves it to the node
+ * (its etc/stele/profile.json, else stele-default). Only a name the node could
+ * have is sent; the node refuses one it cannot apply, and the panel then shows
+ * that error rather than an answer under some other profile. */
+async function profile() {
+  try {
+    const got = await chrome.storage.local.get({ profile: '' });
+    const p = String(got.profile || '').trim();
+    return /^[a-z0-9._-]{1,64}$/.test(p) ? p : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function withProfile(path, p) {
+  return p ? path + (path.includes('?') ? '&' : '?') + 'profile=' + encodeURIComponent(p)
+           : path;
+}
+
 async function ask(path, body) {
   const base = 'http://127.0.0.1:' + (await port());
+  path = withProfile(path, await profile());
   const opts = { cache: 'no-store', credentials: 'omit' };
   if (body !== undefined) {
     opts.method = 'POST';
@@ -54,6 +74,18 @@ async function standing(url, bundle) {
     const st = await ask('/standing?url=' + encodeURIComponent(u));
     if (st) return st;
   }
+  // Not heard in the node's own group: ask its discovery relays (Phase 4). What
+  // they hand over is folded in and verified by the node, under the anchor of
+  // a polity it follows, or not at all.
+  if (!(bundle && typeof bundle === 'object')) {
+    for (const u of stelePanel.candidates(url)) {
+      const r = await ask('/relay/standing?url=' + encodeURIComponent(u));
+      if (r && r.standing && r.standing.heard !== false) {
+        return Object.assign({}, r.standing, r.reason ? { reason: r.reason } : {},
+          { relays: Array.isArray(r.relays) ? r.relays.length : 0 });
+      }
+    }
+  }
   return { state: 'unknown', heard: false };
 }
 
@@ -71,6 +103,33 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       .then(st => { badge(tabId, stelePanel.render(st)); reply({ standing: st }); })
       .catch(e => { badge(tabId, stelePanel.render(null, String(e.message || e)));
                     reply({ error: String(e.message || e) }); });
+    return true;
+  }
+  if (msg && msg.type === 'team' && typeof msg.q === 'string') {
+    // An organization page: the best-matching team this node holds a roster
+    // for (viewer /teams), shown with its worst-of standing.
+    const tabId = sender.tab ? sender.tab.id : null;
+    ask('/teams?q=' + encodeURIComponent(msg.q))
+      .then(r => {
+        const ts = (r && Array.isArray(r.results) && r.results[0]) || null;
+        if (ts) badge(tabId, stelePanel.renderTeam(ts));
+        reply({ team: ts });
+      })
+      .catch(e => reply({ error: String(e.message || e) }));
+    return true;
+  }
+  if (msg && msg.type === 'relay-search' && typeof msg.q === 'string') {
+    // Other groups' repositories, through the node's discovery relays: each
+    // relay's word beside what the node verified (viewer /relay/search).
+    ask('/relay/search?q=' + encodeURIComponent(msg.q))
+      .then(r => reply({ results: ((r && r.results) || []).map(stelePanel.renderRelay) }))
+      .catch(e => reply({ error: String(e.message || e) }));
+    return true;
+  }
+  if (msg && msg.type === 'relay-standing' && typeof msg.url === 'string') {
+    ask('/relay/standing?url=' + encodeURIComponent(msg.url))
+      .then(r => reply({ standing: r && r.standing, relays: r && r.relays }))
+      .catch(e => reply({ error: String(e.message || e) }));
     return true;
   }
   if (msg && msg.type === 'search' && typeof msg.q === 'string') {

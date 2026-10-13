@@ -106,6 +106,32 @@ def test_a_clean_claim_is_contradicted_only_by_a_finding():
     assert scanners.check_claim('clean', [probes[1]])['contradicted_by'] == []
 
 
+def test_each_manifest_names_the_package_its_repo_publishes_as(tmp_path):
+    (tmp_path / 'go.mod').write_text('// x\nmodule forge.local/alice/demo\n\ngo 1.22\n')
+    (tmp_path / 'package.json').write_text(json.dumps({'name': '@alice/demo'}))
+    (tmp_path / 'Cargo.toml').write_text('[package]\nname = "demo"\n')
+    (tmp_path / 'pyproject.toml').write_text('[project]\nname = "Demo_Tool"\n')
+    found = dict(scanners.manifest_packages(str(tmp_path)))
+    assert found == {'pkg:golang/forge.local/alice/demo': 'go.mod',
+                     'pkg:npm/%40alice/demo': 'package.json',
+                     'pkg:cargo/demo': 'Cargo.toml',
+                     'pkg:pypi/demo-tool': 'pyproject.toml'}
+    report = scanners.check_provides(str(tmp_path), 'pkg:cargo/demo')
+    assert scanners.summarize_provides(report)[:3] == ('clean', 0, '')
+
+
+def test_a_package_no_manifest_names_is_a_finding(tmp_path):
+    (tmp_path / 'go.mod').write_text('module forge.local/alice/demo\n')
+    stolen = scanners.check_provides(str(tmp_path), 'pkg:golang/golang.org/x/net')
+    assert scanners.summarize_provides(stolen)[:3] == ('vuln', 1, 'UNCLAIMED')
+    assert stolen['found'] == ['pkg:golang/forge.local/alice/demo']
+    bare = tmp_path / 'bare'
+    bare.mkdir()
+    (bare / 'Cargo.toml').write_text('not [toml')
+    nothing = scanners.check_provides(str(bare), 'pkg:cargo/demo')
+    assert nothing['found'] == [] and scanners.summarize_provides(nothing)[0] == 'vuln'
+
+
 @pytest.fixture
 def repo(tmp_path):
     """A one-commit git repository with a committed SBOM."""
@@ -159,6 +185,29 @@ def test_the_hook_runs_the_battery_and_checks_the_owners_claims(repo, tmp_path,
     assert done['sbom'][:2] == ('vuln', 1)            # the SBOM omits x/net
     assert done['claim'][:2] == ('vuln', 1)           # osv found one
     assert any('semgrep' in m for m in logged)        # one tool failing is logged
+    # The owner's SBOM matched its digest, so its exact bytes are kept for
+    # a dependent's reader to join through.
+    import stele_deps
+    assert stele_deps.held_sbom(str(root), sbom_digest) == _sbom(PURL_TEXT)
+
+
+def test_a_v4_ad_has_its_package_checked(repo, tmp_path, monkeypatch):
+    url, commit, _ = repo
+    root = tmp_path / 'verifier'
+    owner = '00000000-0000-4000-8000-000000000001'
+    ad = {'owner': owner, 'url': url, 'commit': commit, 'seq': 1, 'v': 4,
+          'sbom_digest': '', 'sbom_path': '', 'claim_verdict': 'none',
+          'polity': '', 'release_auth': '', 'provides': 'pkg:golang/golang.org/x/net'}
+    monkeypatch.setattr(scanners, 'run_osv', lambda src, cfg: {'results': []})
+    calls = []
+    monkeypatch.setattr(stele_hook, 'attest',
+                        lambda root_, owner_, commit_, report, cfg, scanner, url_:
+                        calls.append((scanner, scanners.CHANNELS[scanner], report)) or 0)
+    done = stele_hook.scan_and_attest(str(root), url, commit, owner, ad, {}, log=print)
+    assert [c[:2] for c in calls] == [('osv-scanner', 'probe'),
+                                      ('provides', 'certificate')]
+    assert done['provides'][:2] == ('vuln', 1)        # the clone has no go.mod
+    assert calls[1][2]['claimed'] == 'pkg:golang/golang.org/x/net'
 
 
 def test_replication_re_runs_other_verifiers_probes_it_can_reproduce(
@@ -232,3 +281,54 @@ def test_reports_from_two_checkouts_of_the_same_tree_digest_the_same():
     assert scanners.report_digest(a) == scanners.report_digest(b)
     assert scanners.relative_paths({'p': '/tmp/other/go.mod'}, '/tmp/o') == \
         {'p': '/tmp/other/go.mod'}
+
+
+def test_a_confirmed_team_finding_is_landed_on_the_guardian_once(tmp_path, monkeypatch):
+    """Phase 3: a probe finding about a team release built by a guarded machine
+    is landed on the guardian once a second verifier's replication agrees on
+    its findings digest, and only once. An unconfirmed, a disputed, a clean
+    and an unguarded one are not; nor is one the node already landed."""
+    root = tmp_path / 'verifier'
+    me, them, other = ('00000000-0000-4000-8000-00000000000%d' % i for i in (2, 3, 4))
+    guardian = '00000000-0000-4000-8000-000000000009'
+    (root / 'etc' / 'at').mkdir(parents=True)
+    (root / 'etc' / 'at' / 'identity.cfg.json').write_text(json.dumps({'uuid': me}))
+    ats = root / 'etc' / 'stele' / 'attestations'
+    attrs = root / 'etc' / 'stele' / 'attributions'
+    ats.mkdir(parents=True)
+    attrs.mkdir(parents=True)
+    team_ad, plain_ad = 'ad' * 32, 'ae' * 32
+    (attrs / (team_ad + '.json')).write_text(json.dumps({
+        'polity': 'ab' * 32, 'officer': 'did:key:zo', 'built_by': 'did:key:zci',
+        'guardian': 'did:key:zg', 'guardian_uuid': guardian}))
+
+    def held(at_id, verifier, **more):
+        (ats / (at_id + '.json')).write_text(json.dumps(dict({
+            'verifier': verifier, 'repo_ad_id': team_ad, 'commit': 'c' * 40,
+            'scanner': 'osv-scanner', 'verdict': 'vuln', 'findings_digest': 'f1' * 32,
+            'ts': 1}, **more)))
+    held('01' * 32, them)                                     # confirmed below
+    held('11' * 32, other, v=3, channel='replication', replicates='01' * 32)
+    held('02' * 32, them, ts=2)                               # unconfirmed
+    held('03' * 32, them, ts=3)                               # disputed below
+    held('13' * 32, other, v=3, channel='replication', replicates='03' * 32,
+         findings_digest='f2' * 32)
+    held('04' * 32, them, repo_ad_id=plain_ad)                # not a team release
+    held('14' * 32, other, v=3, channel='replication', replicates='04' * 32,
+         repo_ad_id=plain_ad)
+    held('05' * 32, them, ts=5)                               # already landed...
+    held('15' * 32, other, v=3, channel='replication', replicates='05' * 32)
+    held('25' * 32, me, v=4, attributes='05' * 32)            # ...by this
+
+    assert [i for i, _ in stele_hook.pending_guardians(str(root))] == ['01' * 32]
+    calls = []
+    monkeypatch.setattr(stele_hook.subprocess, 'run',
+                        lambda argv: calls.append(argv[2:]) or
+                        type('R', (), {'returncode': 0})())
+    done = set()
+    assert stele_hook.guardian_once(str(root), done, log=lambda m: None) == {'01' * 32: 0}
+    assert calls == [['guardian', str(root), '01' * 32]]
+    assert stele_hook.guardian_once(str(root), done, log=lambda m: None) == {}
+    # The guardian does not land a finding on itself.
+    (root / 'etc' / 'at' / 'identity.cfg.json').write_text(json.dumps({'uuid': guardian}))
+    assert stele_hook.pending_guardians(str(root)) == []

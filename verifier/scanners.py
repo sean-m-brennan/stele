@@ -39,7 +39,11 @@ Two more check the OWNER'S claims, which a v2 repo ad carries:
   digest it advertised, and must list every component the verifier's own SBOM
   finds;
 * ``claim`` (``self_consistency``): an owner that claimed its release clean,
-  contradicted by any of the probe scanners above.
+  contradicted by any of the probe scanners above;
+* ``provides`` (``certificate``, Phase 4): the package a v4 ad says the repo
+  publishes as must be one its own manifest names (go.mod, package.json,
+  Cargo.toml, pyproject.toml), so an ad cannot claim another repo's package
+  and stand in for it in a dependent's supply chain.
 
 The verifier's own SBOM comes from syft (``dir:<src>``, CycloneDX JSON).
 """
@@ -47,8 +51,15 @@ import glob
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
+from urllib.parse import quote
+
+try:
+    import tomllib   # Python 3.11+; without it Cargo/pyproject names go unread
+except ImportError:  # pragma: no cover
+    tomllib = None
 
 PROBE, CERTIFICATE, SELF_CONSISTENCY = 'probe', 'certificate', 'self_consistency'
 
@@ -168,6 +179,14 @@ def summarize_sbom(report):
     return ('vuln' if count else 'clean'), count, max_sev, report_digest(report)
 
 
+def summarize_provides(report):
+    """The provides check's own report: ``{claimed, found, manifests}``. A
+    claim no manifest of the commit names is one finding."""
+    ok = report.get('claimed') in (report.get('found') or [])
+    return ('clean' if ok else 'vuln'), 0 if ok else 1, '' if ok else 'UNCLAIMED', \
+        report_digest(report)
+
+
 def summarize_claim(report):
     """The claim check's own report: ``{claim, contradicted_by: [...]}``."""
     by = report.get('contradicted_by') or []
@@ -178,9 +197,11 @@ def summarize_claim(report):
 
 SUMMARIES = {'osv-scanner': summarize_osv, 'gitleaks': summarize_gitleaks,
              'semgrep': summarize_semgrep, 'license': summarize_license,
-             'sbom': summarize_sbom, 'claim': summarize_claim}
+             'sbom': summarize_sbom, 'claim': summarize_claim,
+             'provides': summarize_provides}
 CHANNELS = {'osv-scanner': PROBE, 'gitleaks': PROBE, 'semgrep': PROBE,
-            'license': PROBE, 'sbom': CERTIFICATE, 'claim': SELF_CONSISTENCY}
+            'license': PROBE, 'sbom': CERTIFICATE, 'claim': SELF_CONSISTENCY,
+            'provides': CERTIFICATE}
 
 
 # ---------------- SBOM components ----------------
@@ -231,6 +252,54 @@ def check_sbom(src, sbom_path, claimed_digest, own_sbom) -> dict:
         theirs = set()
     report['missing'] = sorted(sbom_components(own_sbom) - theirs)
     return report
+
+
+def _toml(path):
+    if tomllib is None:
+        return {}
+    try:
+        with open(path, 'rb') as f:
+            return tomllib.load(f)
+    except (OSError, ValueError):   # TOMLDecodeError is a ValueError
+        return {}
+
+
+def manifest_packages(src) -> list:
+    """``[(purl base, manifest)]`` for the packages the manifests at the top of
+    the checkout publish: a Go module, an npm package, a Cargo crate, a Python
+    project. Names are spelled the way syft spells them in a dependent's SBOM."""
+    out = []
+    gomod = os.path.join(src, 'go.mod')
+    if os.path.isfile(gomod):
+        with open(gomod, encoding='utf-8', errors='replace') as f:
+            m = re.search(r'^\s*module\s+"?([^\s"]+)"?', f.read(), re.M)
+        if m:
+            out.append(('pkg:golang/' + m.group(1), 'go.mod'))
+    pkg = os.path.join(src, 'package.json')
+    if os.path.isfile(pkg):
+        try:
+            with open(pkg, encoding='utf-8') as f:
+                name = json.load(f).get('name')
+        except (OSError, ValueError, AttributeError):
+            name = None
+        if isinstance(name, str) and name:
+            out.append(('pkg:npm/' + quote(name, safe='/'), 'package.json'))
+    crate = (_toml(os.path.join(src, 'Cargo.toml')).get('package') or {}).get('name')
+    if isinstance(crate, str) and crate:
+        out.append(('pkg:cargo/' + crate, 'Cargo.toml'))
+    project = (_toml(os.path.join(src, 'pyproject.toml')).get('project') or {}).get('name')
+    if isinstance(project, str) and project:
+        out.append(('pkg:pypi/' + re.sub(r'[-_.]+', '-', project).lower(),
+                    'pyproject.toml'))
+    return out
+
+
+def check_provides(src, claimed) -> dict:
+    """The package a v4 ad claims against the ones the commit's manifests
+    publish."""
+    found = manifest_packages(src)
+    return {'claimed': claimed, 'found': sorted(p for p, _ in found),
+            'manifests': sorted({m for _, m in found})}
 
 
 def check_licenses(own_sbom, deny) -> dict:
@@ -326,7 +395,7 @@ def version_of(name, cfg) -> str:
         return _tool_version([cfg['semgrep'], '--version'])
     if name in ('license', 'sbom'):
         return _tool_version([cfg['syft'], 'version'], 'Version:')
-    return 'stele-1'
+    return 'stele-1'   # Stele's own checks: claim, provides
 
 
 def db_digest_of(name, cfg) -> str:

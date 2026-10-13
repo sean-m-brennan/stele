@@ -22,7 +22,8 @@
 #   NODES (every node that may run), IP NS V VB ROOT PID (associative, per
 #   node), BR SUBNET PREFIX RUN STELED SHIM ATCORE CTL LOG_LEVEL
 #   CHECKPOINT_SEC RESCORE_SEC WAIT, and optionally LIBDIR (per node: a
-#   directory searched before ATCORE, for a node run on other libraries).
+#   directory searched before ATCORE, for a node run on other libraries), and
+#   EXTRA (per node: more VAR=value words for its environment).
 
 log()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m  OK\033[0m %s\n' "$*"; }
@@ -107,15 +108,17 @@ net_up() {
 
 node_start() { # name
   local n="$1" libs="$ATCORE"
-  local floor=()
+  local floor=() extra=()
   [ -n "${ATTEST_MIN_REP:-}" ] && floor=(AT_ATTEST_MIN_REP="$ATTEST_MIN_REP")
+  # EXTRA (optional, associative): more VAR=value words for one node's env.
+  if declare -p EXTRA >/dev/null 2>&1; then read -ra extra <<<"${EXTRA[$n]:-}"; fi
   [ -n "${LIBDIR[$n]:-}" ] && libs="${LIBDIR[$n]}:$ATCORE"
   ip netns exec "${NS[$n]}" env \
     AUTONOMOUS_TRUST_ROOT="${ROOT[$n]}" \
     AT_PEER_NAME="$n" AT_PEER_SEED="stele-$n" \
     AT_REP_CHECKPOINT_SEC="$CHECKPOINT_SEC" \
     AT_REP_RESCORE_SEC="$RESCORE_SEC" \
-    "${floor[@]}" \
+    "${floor[@]}" "${extra[@]}" \
     LD_LIBRARY_PATH="$libs:${LD_LIBRARY_PATH:-}" \
     "$STELED" extern_to_at at_to_extern "$LOG_LEVEL" \
     >>"${ROOT[$n]}/node.log" 2>&1 &
@@ -129,9 +132,10 @@ node_stop() { # name
 }
 
 ctl() { STELE_SHIM="$SHIM" LD_LIBRARY_PATH="$ATCORE:${LD_LIBRARY_PATH:-}" python3 "$CTL" "$@"; }
-saw() { grep -q "$2" "${ROOT[$1]}/node.log" 2>/dev/null; }
+# -a: a node's log is text, even when a line carries a stray byte (rl-2763743).
+saw() { grep -a -q "$2" "${ROOT[$1]}/node.log" 2>/dev/null; }
 # grep -c prints 0 AND exits 1 on no match, so "|| echo 0" would print it twice.
-count() { local n; n="$(grep -c "$2" "${ROOT[$1]}/node.log" 2>/dev/null)"; echo "${n:-0}"; }
+count() { local n; n="$(grep -a -c "$2" "${ROOT[$1]}/node.log" 2>/dev/null)"; echo "${n:-0}"; }
 wait_for() { # timeout cmd...
   local deadline=$(( SECONDS + $1 )); shift
   until "$@"; do [ "$SECONDS" -ge "$deadline" ] && return 1; sleep 2; done
@@ -170,9 +174,15 @@ P
 # The standing a viewer node folds for CLONE_URL, checked against specs:
 #   state=S  commit=C  has=SCANNER:CHANNEL:VERDICT  agree=SCANNER:CHANNEL:N
 #   counted=SCANNER:CHANNEL:UUID:yes|no  rebutted=SCANNER
+#   profile=NAME  source=builtin|local|followed  missing=SCANNER:CHANNEL
+#   deps_sbom=held|not-held|none  dep=PURL|STATE  dep_status=PURL|STATUS
+#   claimant=PURL|URL_OR_NAME|STATUS|VIA  claimants=PURL|N  capped=deps|team|none
+# Under the node's own profile, or $STANDING_PROFILE when set (Phase 4). The
+# dependency specs split on '|', since a purl and a URL both hold ':'.
 standing_is() { # viewer label spec...
   local viewer="$1" label="$2"; shift 2
-  ctl standing "${ROOT[$viewer]}" "$CLONE_URL" >"$RUN/standing-$label.json" 2>/dev/null
+  ctl standing "${ROOT[$viewer]}" "$CLONE_URL" ${STANDING_PROFILE:+--profile "$STANDING_PROFILE"} \
+    >"$RUN/standing-$label.json" 2>/dev/null
   python3 - "$RUN/standing-$label.json" "$@" <<'P'
 import json, sys
 try:
@@ -205,14 +215,55 @@ for spec in sys.argv[2:]:
     if k == 'rebutted' and not any(c['scanner'] == v and c.get('rebuttal')
                                    for c in checks.values()):
         sys.exit(1)
+    if k == 'profile' and (st.get('profile') or {}).get('name') != v:
+        sys.exit(1)
+    if k == 'source' and (st.get('profile') or {}).get('source') != v:
+        sys.exit(1)
+    if k == 'missing' and v not in (st.get('missing_required') or []):
+        sys.exit(1)
+    deps = st.get('deps') or {}
+    items = {i['purl']: i for i in deps.get('items') or []}
+    if k == 'deps_sbom' and deps.get('sbom') != v:
+        sys.exit(1)
+    if k in ('dep', 'dep_status', 'claimants', 'claimant'):
+        purl, _, rest = v.partition('|')
+        item = items.get(purl)
+        if item is None:
+            sys.exit(1)
+        if k == 'dep' and item.get('state') != rest:
+            sys.exit(1)
+        if k == 'dep_status' and item.get('status') != rest:
+            sys.exit(1)
+        if k == 'claimants' and len(item.get('claimants') or []) != int(rest):
+            sys.exit(1)
+        if k == 'claimant':
+            who, status, via = rest.split('|')   # who: a resolved URL, or a name
+            if not any(who in (c.get('url'), c.get('name')) and c.get('status') == status
+                       and c.get('via') == via for c in item.get('claimants') or []):
+                sys.exit(1)
+    if k == 'capped':
+        got = [w for w in ('deps', 'team') if st.get('capped_by_' + w)] or ['none']
+        if v not in got:
+            sys.exit(1)
 P
 }
 show_standing() { # label
   python3 - "$RUN/standing-$1.json" <<'P'
 import json, sys
 st = json.load(open(sys.argv[1]))
-print(f"    {st['repo']['name']} @ {st['repo']['commit'][:12]}: {st['state']}, score {st.get('score')}")
+prof = st.get('profile') or {}
+print(f"    {st['repo']['name']} @ {st['repo']['commit'][:12]}: {st['state']}, score {st.get('score')}"
+      + (f"  [profile {prof.get('name')}, {prof.get('source')}]" if prof else ''))
 for c in st.get('checks') or []:
     print(f"      [{c.get('state')}] {c['reason']}")
+deps = st.get('deps') or {}
+if deps.get('sbom') not in (None, 'none'):
+    print(f"      dependencies (SBOM {deps['sbom']}): {deps.get('resolved', 0)} read, "
+          f"{deps.get('unresolved', 0)} not, worst {deps.get('state')}"
+          + ('  [capped]' if st.get('capped_by_deps') else ''))
+    for i in deps.get('items') or []:
+        print(f"        {i['purl']}: {i['status']} {i.get('state') or ''} "
+              + ', '.join(f"{c.get('url') or c.get('name')}={c['status']}/{c['via']}"
+                          for c in i.get('claimants') or []))
 P
 }

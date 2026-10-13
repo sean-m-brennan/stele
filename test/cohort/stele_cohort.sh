@@ -355,7 +355,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   prev="$cur"; sleep "$SETTLE_SEC"
 done
 [ "$settled" = 1 ] || fail "phase 2" "the observer's view of the owner never settled (last '$cur', before '$prev')"
-ok "phase 2: observer holds the verifier at $(rep_of observer "${U[verifier]}") (owner: '$(rep_of owner "${U[verifier]}")')$([ -n "${ATTEST_MIN_REP:-}" ] && echo "  [floor LOWERED to $ATTEST_MIN_REP]")"
+ok "phase 2: observer holds the verifier at $(rep_of observer "${U[verifier]}") (owner: '$(rep_of observer "${U[owner]}")')$([ -n "${ATTEST_MIN_REP:-}" ] && echo "  [floor LOWERED to $ATTEST_MIN_REP]")"
 
 # --------------------------------------------------------------------------- #
 # Phase 3 — the owner advertises its repository

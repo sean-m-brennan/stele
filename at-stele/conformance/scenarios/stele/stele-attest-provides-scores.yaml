@@ -1,0 +1,52 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attest-provides-scores
+byte_pinning: false
+description: |
+    A verifier reads the repo's manifest and finds it does not publish the
+    package the owner's v4 ad says it provides. That is a finding on the
+    `certificate` channel (scanner `provides`), scored 0.3 about the ad's
+    owner, whether or not the ad carries an SBOM.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+fixtures:
+  stele_ads:
+    carol:
+      - owner: alice
+        name: demo
+        url: http://forge.local/alice/demo.git
+        ref: main
+        commit: "0123456789abcdef0123456789abcdef01234567"
+        seq: 1
+        ts: 1790000000
+        v: 4
+        claim_verdict: none
+        provides: pkg:golang/forge.local/bob/net
+
+steps:
+  - id: 1
+    from: carol
+    to: carol
+    function: trigger_stele_attest
+    payload:
+      owner: alice
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      scanner: provides
+      verdict: vuln
+      count: 1
+      channel: certificate
+    description: carol attests that the manifest names another module.
+
+expected_state:
+  carol:
+    stele_scores:
+      - subject: alice
+        score: 0.3

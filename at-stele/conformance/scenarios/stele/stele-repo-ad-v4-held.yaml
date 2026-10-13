@@ -1,0 +1,41 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-repo-ad-v4-held
+byte_pinning: false
+description: |
+    A version-4 ad names the package the repo publishes as (`provides`, a
+    versionless purl), so a dependent's SBOM can be joined to it. A solo
+    release leaves the team fields empty. It is held like any other ad: from
+    its owner, signed by the owner's key.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: member
+  - id: carol
+    role: verifier
+
+steps:
+  - id: 1
+    from: alice
+    to: bob
+    function: stele repo
+    payload:
+      name: demo
+      url: http://forge.local/alice/demo.git
+      ref: v1.0.0
+      commit: "0123456789abcdef0123456789abcdef01234567"
+      seq: 1
+      ts: 1790000000
+      v: 4
+      sbom_digest: "abababababababababababababababababababababababababababababababab"
+      sbom_path: sbom.cdx.json
+      claim_verdict: none
+      provides: pkg:golang/forge.local/alice/demo
+    description: alice advertises a release that provides a Go module.
+
+expected_state:
+  bob:
+    stele_ads_held: 1

@@ -47,6 +47,12 @@ findings digest. AT admits a replication only from a verifier at tier 3 in its
 co-signers' view, and the viewer counts a check as confirmed once enough
 verifiers agree.
 
+And it ATTRIBUTES (Phase 3). On the same passes, a finding against a TEAM
+release that two verifiers confirm (a probe and a replication of it with the
+same findings digest) is landed on the guardian of the machine that built the
+release (`stele_ctl.py guardian`), once per finding. The node refuses unless it
+attributed the release to a team with a guarded builder.
+
   stele_hook.py --root VERIFIER_ROOT --config hook.json [--port 8098]
                 [--replicate-every SEC]
   stele_hook.py replicate --root VERIFIER_ROOT --config hook.json
@@ -79,9 +85,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CTL = os.path.join(HERE, '..', 'tools', 'stele_ctl.py')
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
+VIEWER = os.path.normpath(os.path.join(HERE, '..', 'viewer'))
+for _p in (VIEWER, HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 import scanners  # noqa: E402
+import stele_deps  # noqa: E402
 
 
 def signature_ok(secret: str, body: bytes, header: str) -> bool:
@@ -218,8 +227,17 @@ def scan_and_attest(root: str, url: str, commit: str, owner: str, ad, cfg: dict,
                 report = scanners.check_sbom(src, ad['sbom_path'], ad['sbom_digest'], own)
                 attest(root, owner, commit, report, cfg, 'sbom', url)
                 done['sbom'] = scanners.summarize_sbom(report)
+                if report['digest_ok']:
+                    # Keep the owner's exact bytes: a dependent's reader joins
+                    # its dependencies through them (stele_deps).
+                    with open(os.path.join(src, ad['sbom_path']), 'rb') as f:
+                        stele_deps.keep_sbom(root, f.read())
             except (KeyError, RuntimeError, OSError, ValueError) as err:
                 log(f'stele_hook: sbom check on {commit[:12]} failed: {err}')
+        if ad and ad.get('v') == 4 and ad.get('provides'):
+            report = scanners.check_provides(src, ad['provides'])
+            attest(root, owner, commit, report, cfg, 'provides', url)
+            done['provides'] = scanners.summarize_provides(report)
         if ad and ad.get('claim_verdict') == 'clean':
             report = scanners.check_claim('clean', probes)
             if report['contradicted_by']:
@@ -302,6 +320,44 @@ def replicate_once(root: str, cfg: dict, done: set, log=print) -> dict:
     return out
 
 
+def pending_guardians(root: str, done=()) -> list:
+    """The probe findings about guarded team releases that two verifiers
+    confirm (the probe and another verifier's replication agreeing on the
+    findings digest) and this node has not yet landed on the builder's
+    guardian (nor tried, `done`), oldest first."""
+    me = node_uuid(root)
+    held = _held(root, 'attestations')
+    attrs = _held(root, 'attributions')
+    landed = {a.get('attributes') for a in held.values()
+              if a.get('verifier') == me and a.get('v') == 4}
+    out = []
+    for at_id, at in held.items():
+        attr = attrs.get(at.get('repo_ad_id')) or {}
+        if (at_id in landed or at_id in done or at.get('verdict') != 'vuln'
+                or at.get('channel', 'probe') != 'probe' or at.get('v') == 4
+                or not attr.get('guardian_uuid') or attr['guardian_uuid'] == me):
+            continue
+        confirmed = any(r.get('replicates') == at_id and r.get('verdict') == 'vuln'
+                        and r.get('findings_digest') == at.get('findings_digest')
+                        and r.get('verifier') != at.get('verifier')
+                        for r in held.values())
+        if confirmed:
+            out.append((at_id, at))
+    return sorted(out, key=lambda t: t[1].get('ts', 0))
+
+
+def guardian_once(root: str, done: set, log=print) -> dict:
+    """Land each pending confirmed finding on its builder's guardian. Returns
+    {attestation id: exit code}; every id is added to `done`."""
+    out = {}
+    for at_id, at in pending_guardians(root, done):
+        done.add(at_id)
+        rc = subprocess.run([sys.executable, CTL, 'guardian', root, at_id]).returncode
+        log(f'stele_hook: landed {at_id[:12]} on its builder\'s guardian (rc {rc})')
+        out[at_id] = rc
+    return out
+
+
 def make_handler(root: str, cfg: dict):
     class Hook(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -358,10 +414,11 @@ def main(argv):
     args = ap.parse_args(argv[1:])
     with open(args.config) as f:
         cfg = json.load(f)
-    done = set()
+    done, landed = set(), set()
     if args.mode == 'replicate':
         out = replicate_once(args.root, cfg, done,
                              log=lambda m: print(m, flush=True))
+        guardian_once(args.root, landed, log=lambda m: print(m, flush=True))
         print(json.dumps(out), flush=True)
         return 0
     if args.replicate_every > 0:
@@ -371,6 +428,8 @@ def main(argv):
                 try:
                     replicate_once(args.root, cfg, done,
                                    log=lambda m: print(m, flush=True))
+                    guardian_once(args.root, landed,
+                                  log=lambda m: print(m, flush=True))
                 except (OSError, ValueError, KeyError) as err:
                     print(f'stele_hook: replication pass failed: {err}', flush=True)
         threading.Thread(target=_loop, daemon=True).start()

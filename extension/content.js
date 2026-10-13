@@ -13,7 +13,6 @@
   const https = document.getElementById('repo-clone-https');
   const url = stelePanel.cloneUrl(meta && meta.getAttribute('content'),
                                   https && https.getAttribute('data-link'));
-  if (!url) return;
 
   function el(tag, style, text) {
     const e = document.createElement(tag);
@@ -62,6 +61,19 @@
       } catch (e) { /* not there, or not JSON */ }
     }
     return undefined;
+  }
+
+  if (!url) {
+    // Not a repository: perhaps an organization's page, whose team (Phase 3)
+    // the node may hold a roster for.
+    const org = stelePanel.orgOf(location.pathname,
+                                 !!document.querySelector('.page-content.organization'));
+    if (!org) return;
+    chrome.runtime.sendMessage({ type: 'team', q: org }, resp => {
+      if (chrome.runtime.lastError || !resp || resp.error || !resp.team) return;
+      show(stelePanel.renderTeam(resp.team));
+    });
+    return;
   }
 
   bundle().then(b => chrome.runtime.sendMessage({ type: 'standing', url, bundle: b }, resp => {

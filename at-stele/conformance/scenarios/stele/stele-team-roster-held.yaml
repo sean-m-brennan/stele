@@ -1,0 +1,38 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-team-roster-held
+byte_pinning: false
+description: |
+    A team's roster, sent by one of its members, is held (Phase 3).
+
+    The roster is signed by the team's root key and lists each member's AT node
+    with that node's own consent. bob holds the keys of alice and carol, so he
+    can check every consent, and alice, who sent it, is listed. bob holds the
+    roster; its nodes become a team in AT's conflict set, and from then on they
+    do not witness for each other (AT ISSUES §2.54).
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: owner
+
+fixtures:
+  stele_team:
+    members: [alice, carol]
+    officers: [alice]
+
+steps:
+  - id: 1
+    from: alice
+    to: bob
+    function: stele team
+    payload: {}
+    description: alice multicasts her team's roster.
+
+expected_state:
+  bob:
+    stele_teams_held: 1

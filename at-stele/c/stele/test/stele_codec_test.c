@@ -309,8 +309,97 @@ DEFINE_TEST(test_stele_v2_envelopes_and_rebuttal)
 }
 END_TEST_DEFINITION()
 
+/* Version 4 (Phase 4): a solo ad names the package it provides
+ * (python/tests/test_codec.py, test_v4_fixed_vector). */
+static stele_repo_ad_t _ad4(void)
+{
+    stele_repo_ad_t ad = _ad();
+    uuid_parse("00000000-0000-4000-8000-000000000001", ad.owner);
+    ad.version = 4;
+    snprintf(ad.description, sizeof(ad.description), "a demo repo");
+    snprintf(ad.topics, sizeof(ad.topics), "go,demo");
+    snprintf(ad.sbom_digest, sizeof(ad.sbom_digest), "%s",
+             "abababababababababababababababababababababababababababababababab");
+    snprintf(ad.sbom_path, sizeof(ad.sbom_path), "sbom.cdx.json");
+    snprintf(ad.claim_verdict, sizeof(ad.claim_verdict), "clean");
+    snprintf(ad.provides, sizeof(ad.provides), "pkg:golang/forge.local/alice/demo");
+    return ad;
+}
+
+DEFINE_TEST(test_stele_v4_fixed_vector)
+{
+    stele_repo_ad_t ad = _ad4();
+    char id[STELE_ID_HEX + 1];
+    ck_assert_ret_ok(stele_repo_ad_id(&ad, id));
+    ck_assert_str_eq(id, "a406d340c5f37d28ff8e1384f5d4bdb50892a0ab76c95d513ba317f9a3d8489c");
+    ck_assert(!stele_repo_ad_is_team(&ad));
+
+    /* The envelope carries provides and round-trips to the same id. */
+    json_t *env = stele_repo_ad_to_json(&ad, "00");
+    stele_repo_ad_t back;
+    char sig[STELE_SIG_HEX + 1];
+    ck_assert_ret_ok(stele_repo_ad_from_json(env, &back, sig));
+    char id2[STELE_ID_HEX + 1];
+    ck_assert_ret_ok(stele_repo_ad_id(&back, id2));
+    ck_assert_str_eq(id, id2);
+    json_object_del(env, "provides");
+    ck_assert_int_eq(stele_repo_ad_from_json(env, &back, sig), -1);
+    json_decref(env);
+}
+END_TEST_DEFINITION()
+
+DEFINE_TEST(test_stele_v4_field_rules)
+{
+    stele_repo_ad_t ad = _ad4();
+    ck_assert(stele_repo_ad_valid(&ad));
+    ad.provides[0] = '\0';
+    ck_assert(stele_repo_ad_valid(&ad));
+    const char *bad[] = {"pkg:golang/forge.local/alice/demo@v1.0.0",
+                         "pkg:npm/left-pad?arch=x86", "pkg:npm/left-pad#lib",
+                         "pkg:NPM/left-pad", "pkg:npm/", "pkg:npm", "npm/left-pad",
+                         "pkg:npm/a//b", "pkg:npm/a/", "pkg:npm/left pad"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+    {
+        snprintf(ad.provides, sizeof(ad.provides), "%s", bad[i]);
+        if (stele_repo_ad_valid(&ad))
+            fprintf(stderr, "accepted a bad provides: %s\n", bad[i]);
+        ck_assert(!stele_repo_ad_valid(&ad));
+    }
+    snprintf(ad.provides, sizeof(ad.provides), "pkg:npm/left-pad");
+    ck_assert(stele_repo_ad_valid(&ad));
+    /* The team fields come together or not at all. */
+    snprintf(ad.release_auth, sizeof(ad.release_auth), "x");
+    ck_assert(!stele_repo_ad_valid(&ad));
+    snprintf(ad.polity, sizeof(ad.polity), "%s",
+             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    ck_assert(stele_repo_ad_valid(&ad));
+    ck_assert(stele_repo_ad_is_team(&ad));
+    ad.release_auth[0] = '\0';
+    ck_assert(!stele_repo_ad_valid(&ad));
+
+    /* Every field at its maximum still has a canonical form. */
+    stele_repo_ad_t big = _ad4();
+    memset(big.name, 'n', STELE_NAME_MAX);
+    memset(big.url, 'u', STELE_URL_MAX);
+    memset(big.ref, 'r', STELE_REF_MAX);
+    memset(big.commit, 'a', 64);
+    big.seq = INT64_MAX;
+    big.ts = INT64_MAX;
+    memset(big.description, 'd', STELE_DESC_MAX);
+    memset(big.topics, 't', STELE_TOPICS_MAX);
+    memset(big.sbom_path, 'p', STELE_PATH_MAX);
+    memset(big.polity, 'a', STELE_PK_HEX);
+    memset(big.release_auth, 'x', STELE_RELEASE_TEXT_MAX);
+    snprintf(big.provides, sizeof(big.provides), "pkg:npm/%0120d", 0);
+    uint8_t canon[STELE_CANON_MAX];
+    ck_assert(stele_repo_ad_valid(&big));
+    ck_assert(stele_repo_ad_canonical(&big, canon, sizeof(canon)) > 0);
+}
+END_TEST_DEFINITION()
+
 RUN_TESTS(SteleCodec, test_stele_repo_ad_signs_verifies_and_round_trips,
           test_stele_field_rules, test_stele_fixed_vectors,
           test_stele_v2_fixed_vectors,
           test_stele_v3_fixed_vectors,
-          test_stele_v2_envelopes_and_rebuttal)
+          test_stele_v2_envelopes_and_rebuttal,
+          test_stele_v4_fixed_vector, test_stele_v4_field_rules)

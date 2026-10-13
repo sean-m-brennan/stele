@@ -25,7 +25,19 @@ attestation, under tags of their own, so a v1 artifact's bytes never change.
 Version 3 (``'v': 3``, Phase 2) appends ``replicates`` to an attestation: the
 id of the attestation a replication re-ran, set exactly on the ``replication``
 channel. A rebuttal is ``{owner, attestation_id, text, ts}``. Envelopes add
-``sig``."""
+``sig``.
+
+Phase 3 (teams): a v3 ad (``'v': 3``) appends ``polity`` (the team's root key,
+hex) and binds ``release_auth`` (the officer's release authorization file,
+carried in the envelope) by its blake2b-256 digest; a v4 attestation appends
+``attributes`` (the finding it lands on a builder's guardian) and
+``guardian_of`` (the builder machine's DID). See team.py.
+
+Phase 4 (supply chain): a v4 ad (``'v': 4``) carries the v3 fields, which are
+both empty for a solo release, and appends ``provides``: the versionless purl
+the repo publishes as (``pkg:<type>/[<namespace>/]<name>``, or empty), so a
+dependent's SBOM can be joined to it. A verifier checks the claim against the
+repo's manifest on the certificate channel (scanner ``provides``)."""
 
 import hashlib
 from uuid import UUID
@@ -55,6 +67,26 @@ AD2_KEYS = ('description', 'topics', 'sbom_digest', 'sbom_path', 'claim_verdict'
 ATTEST2_KEYS = ('channel', 'scope')
 ATTEST3_KEYS = ATTEST2_KEYS + ('replicates',)
 REBUT_KEYS = ('owner', 'attestation_id', 'text', 'ts')
+AD3_KEYS = AD2_KEYS + ('polity', 'release_auth')
+ATTEST4_KEYS = ATTEST2_KEYS + ('attributes', 'guardian_of')
+RELEASE_TEXT_MAX, DID_TEXT_MAX = 2048, 64
+AD4_KEYS = AD3_KEYS + ('provides',)
+PROVIDES_MAX = 128
+SCANNER_PROVIDES = 'provides'
+#: Mirrors STELE_CANON_MAX: the C twin refuses canonical bytes past it.
+CANON_MAX = 2048
+
+
+def release_digest(release_auth) -> str:
+    """blake2b-256 of a release authorization file's exact text, which a v3
+    ad's canonical form binds it by. Mirrors stele_release_digest."""
+    return hashlib.blake2b(release_auth.encode('utf-8'), digest_size=32).hexdigest()
+
+
+def _did_ok(s) -> bool:
+    return (isinstance(s, str) and s.startswith('did:key:z')
+            and len(s.encode('utf-8')) <= DID_TEXT_MAX
+            and all(0x21 <= ord(c) < 0x7f and c != '|' for c in s))
 
 
 def _field_ok(s, max_len, empty_ok=False) -> bool:
@@ -86,11 +118,48 @@ def _v2(item) -> bool:
     return isinstance(item, dict) and item.get('v') == 2
 
 
+def _ad_v2(ad) -> bool:
+    """Versions 2, 3 and 4 of the ad all carry the v2 fields."""
+    return isinstance(ad, dict) and ad.get('v') in (2, 3, 4)
+
+
+def is_team_ad(ad) -> bool:
+    """A team release: a v3 ad, or a v4 ad that names a polity. Mirrors
+    stele_repo_ad_is_team."""
+    return isinstance(ad, dict) and (
+        ad.get('v') == 3 or (ad.get('v') == 4 and bool(ad.get('polity'))))
+
+
+_PURL_TYPE = set('abcdefghijklmnopqrstuvwxyz0123456789.+-')
+
+
+def purl_base_ok(s) -> bool:
+    """A versionless purl, ``pkg:<type>/[<namespace>/]<name>``: no version,
+    qualifier, subpath or space. Mirrors stele_purl_base_ok."""
+    if not _field_ok(s, PROVIDES_MAX) or not s.startswith('pkg:'):
+        return False
+    typ, sep, rest = s[4:].partition('/')
+    if not typ or not sep or not rest or set(typ) - _PURL_TYPE:
+        return False
+    return not any(c in rest for c in '@?# ') and '//' not in rest \
+        and not rest.endswith('/')
+
+
 def repo_ad_valid(ad) -> bool:
     try:
-        if ad.get('v', 1) not in (1, 2):
+        if ad.get('v', 1) not in (1, 2, 3, 4):
             return False
-        if _v2(ad):
+        if ad.get('v') == 4:
+            if not is_team_ad(ad) and ad['release_auth'] != '':
+                return False   # a release authorization needs its polity
+            if ad['provides'] != '' and not purl_base_ok(ad['provides']):
+                return False
+        if is_team_ad(ad) and not (
+                _hex_ok(ad['polity'], DIGEST_HEX)
+                and isinstance(ad['release_auth'], str) and ad['release_auth']
+                and len(ad['release_auth'].encode('utf-8')) <= RELEASE_TEXT_MAX):
+            return False
+        if _ad_v2(ad):
             has_sbom = ad['sbom_digest'] != ''
             if not (_field_ok(ad['description'], DESC_MAX, empty_ok=True)
                     and _field_ok(ad['topics'], TOPICS_MAX, empty_ok=True)
@@ -115,7 +184,13 @@ def repo_ad_valid(ad) -> bool:
 
 def attestation_valid(at) -> bool:
     try:
-        if at.get('v', 1) not in (1, 2, 3):
+        if at.get('v', 1) not in (1, 2, 3, 4):
+            return False
+        if at.get('v') == 4 and not (
+                at['channel'] == CHANNEL_PROBE and at['verdict'] == VERDICT_VULN
+                and _hex_ok(at['scope'], DIGEST_HEX)
+                and _hex_ok(at['attributes'], DIGEST_HEX)
+                and _did_ok(at['guardian_of'])):
             return False
         if _v2(at) and not (at['channel'] in CHANNELS
                             and _hex_ok(at['scope'], DIGEST_HEX)):
@@ -151,10 +226,21 @@ def repo_ad_canonical(ad) -> bytes:
         raise ValueError('invalid repo ad')
     fields = [_uuid(ad['owner']), ad['name'], ad['url'], ad['ref'],
               ad['commit'], str(ad['seq']), str(ad['ts'])]
-    if not _v2(ad):
+    if not _ad_v2(ad):
         return b'STELE-REPO\x00' + '|'.join(fields).encode('utf-8')
     fields += [ad[k] for k in AD2_KEYS]
-    return b'STELE-REPO2\x00' + '|'.join(fields).encode('utf-8')
+    if ad['v'] == 2:
+        return b'STELE-REPO2\x00' + '|'.join(fields).encode('utf-8')
+    fields += [ad['polity'],
+               release_digest(ad['release_auth']) if is_team_ad(ad) else '']
+    if ad['v'] == 3:
+        canon = b'STELE-REPO3\x00' + '|'.join(fields).encode('utf-8')
+    else:
+        fields.append(ad['provides'])
+        canon = b'STELE-REPO4\x00' + '|'.join(fields).encode('utf-8')
+    if len(canon) > CANON_MAX:
+        raise ValueError('repo ad exceeds the canonical form the C twin takes')
+    return canon
 
 
 def attestation_canonical(at) -> bytes:
@@ -169,6 +255,9 @@ def attestation_canonical(at) -> bytes:
     fields += [at['channel'], at['scope']]
     if _v2(at):
         return b'STELE-ATTEST2\x00' + '|'.join(fields).encode('utf-8')
+    if at['v'] == 4:
+        fields += [at['attributes'], at['guardian_of']]
+        return b'STELE-ATTEST4\x00' + '|'.join(fields).encode('utf-8')
     fields.append(at['replicates'])
     return b'STELE-ATTEST3\x00' + '|'.join(fields).encode('utf-8')
 
@@ -245,8 +334,9 @@ def from_envelope(env, keys):
     out = {}
     extra = ()
     if 'v' in env:
-        versions = {AD_KEYS: {2: AD2_KEYS},
-                    ATTEST_KEYS: {2: ATTEST2_KEYS, 3: ATTEST3_KEYS}}.get(tuple(keys), {})
+        versions = {AD_KEYS: {2: AD2_KEYS, 3: AD3_KEYS, 4: AD4_KEYS},
+                    ATTEST_KEYS: {2: ATTEST2_KEYS, 3: ATTEST3_KEYS,
+                                  4: ATTEST4_KEYS}}.get(tuple(keys), {})
         if env['v'] not in versions or isinstance(env['v'], bool):
             return None
         extra = versions[env['v']]

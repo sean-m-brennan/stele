@@ -45,6 +45,20 @@
  * AT_APP_STELE_REBUT is the owner's signed reply to an attestation about its
  * repo, shown beside it and never scored.
  *
+ * Phase 3 adds teams (stele_team.h). AT_APP_STELE_PUBLISH_TEAM hands this
+ * node a team roster ({"roster": <file text>}); identity holds it when the
+ * root signature and every member's consent verify and this node is listed,
+ * then multicasts it (`stele team`). A held roster's members are written to
+ * AT's conflict set (etc/at/attest_conflicts.cfg.json, AT ISSUES §2.54), so a
+ * teammate neither witnesses for nor counts toward an attestation about its
+ * team. The advertise verb takes "polity" (the team's root key, hex) and
+ * "release_auth" (the officer's release authorization file) for a version-3
+ * ad; the ad is the team's when the authorization verifies under an officer
+ * of a held roster and this node is that officer's. A team ad found unsafe
+ * lands on its officer's node (the ad owner) as before, and the attest verb
+ * with {"attributes": <a held finding's id>} lands a weaker score on the
+ * guardian of the machine that built the release (a version-4 attestation).
+ *
  * Every ad, attestation and rebuttal a node holds is kept under
  * <root>/etc/stele/{ads,attestations,rebuttals}/<id>.json (the signed
  * envelope), and announced on the app channel as a STELE event (below).
@@ -61,12 +75,24 @@
 #define AT_APP_STELE_ADVERTISE_REPO "app_stele_advertise_repo"
 #define AT_APP_STELE_ATTEST         "app_stele_attest"
 #define AT_APP_STELE_REBUT          "app_stele_rebut"
+#define AT_APP_STELE_PUBLISH_TEAM   "app_stele_publish_team"
+/* Discovery relays (Phase 4, stele_relay.h). Each goes to this node's own
+ * network process, which asks every relay it is connected to and writes the
+ * merged answers to <root>/etc/stele/relay/<search|fetch>-<rid>.json, rid the
+ * first 16 hex of sha256(kind "|" query). RELAY_PUBLISH files what this node
+ * holds at its own relays now, as it does each time it registers. */
+#define AT_APP_STELE_RELAY_SEARCH   "app_stele_relay_search"    /* {"q"} */
+#define AT_APP_STELE_RELAY_FETCH    "app_stele_relay_fetch"     /* {"url"} */
+#define AT_APP_STELE_RELAY_PUBLISH  "app_stele_relay_publish"   /* {} */
 
 /* The Stele events: payload at_app_stele_t, read with at_stele_event. Kinds
  * 1110-1119 (AT doc/architecture/extensions.md). */
 #define AT_APP_EVENT_STELE_AD_HELD          1110
 #define AT_APP_EVENT_STELE_ATTESTATION_HELD 1111
 #define AT_APP_EVENT_STELE_REBUTTAL_HELD    1112
+/* A team roster held: @c id is the team's root key (hex), @c name its polity
+ * DID, @c ts its seq. */
+#define AT_APP_EVENT_STELE_TEAM_HELD        1113
 
 /** One held artifact. @c id is its content id; @c owner the repo owner's uuid
  *  (for an attestation, the owner of the ad it is about); @c subject_id the
@@ -97,6 +123,10 @@ const at_app_stele_t *at_stele_event(const at_app_event_t *ev);
 /* A clean claim the owner signed and a scan contradicts (Phase 1, user decision
  * 2026-10-05): lower than a plain finding, because the owner said otherwise. */
 #define STELE_SCORE_CONTRADICTED 0.1
+/* The guardian of the machine that built a team release with a finding
+ * (Phase 3, user decision 2026-10-07): weaker than the finding itself, because
+ * the guardian answers for the machine, not for the code. */
+#define STELE_SCORE_GUARDIAN 0.45
 
 /* Send AT_APP_STELE_ADVERTISE_REPO on @p q_out (the node's extern_to_at queue).
  * Returns 0, or -1 on a bad argument or a failed send. */
@@ -144,6 +174,43 @@ int at_stele_attest3(const char *q_out, const char *owner, const char *commit,
  * most 280 bytes, no '|') to the attestation @p attestation_id about it.
  * Returns 0, or -1. */
 int at_stele_rebut(const char *q_out, const char *attestation_id, const char *text);
+
+/* Send AT_APP_STELE_PUBLISH_TEAM: @p roster is a team roster file's exact
+ * text (stele_team.h). Returns 0, or -1. */
+int at_stele_publish_team(const char *q_out, const char *roster);
+
+/* Version 3 of the advertise verb: as version 2, plus the team's root key
+ * @p polity (64 hex) and the officer's release authorization @p release_auth
+ * (the file's exact text). Returns 0, or -1. */
+int at_stele_advertise_repo3(const char *q_out, const char *name, const char *url,
+                             const char *ref, const char *commit, int64_t seq,
+                             const char *description, const char *topics,
+                             const char *sbom_digest, const char *sbom_path,
+                             const char *claim_verdict, const char *polity,
+                             const char *release_auth);
+
+/* Version 4 of the advertise verb: as version 3, plus @p provides, the
+ * versionless purl the repo publishes as ("" for none). @p polity may be NULL
+ * or "" for a solo release, and then @p release_auth is ignored. */
+int at_stele_advertise_repo4(const char *q_out, const char *name, const char *url,
+                             const char *ref, const char *commit, int64_t seq,
+                             const char *description, const char *topics,
+                             const char *sbom_digest, const char *sbom_path,
+                             const char *claim_verdict, const char *polity,
+                             const char *release_auth, const char *provides);
+
+/* Discovery relays (Phase 4): ask this node's relays for @p q (search) or for
+ * the claims about the repository at @p url (fetch), or file what this node
+ * holds at its own relays now. The answers land as a file (see
+ * AT_APP_STELE_RELAY_SEARCH). Returns 0, or -1. */
+int at_stele_relay_search(const char *q_out, const char *q);
+int at_stele_relay_fetch(const char *q_out, const char *url);
+int at_stele_relay_publish(const char *q_out);
+
+/* Land the held finding @p attributes on the guardian of the machine that
+ * built its team release (a version-4 attestation, scored
+ * STELE_SCORE_GUARDIAN). Returns 0, or -1. */
+int at_stele_attest_guardian(const char *q_out, const char *attributes);
 
 /* Keeps the extension in a static link (AT's registry-anchor rule). */
 void at_stele_link(void);

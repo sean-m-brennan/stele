@@ -103,6 +103,163 @@ panel green.
    lie, the verifier-attested rule holds instead: nothing it signs raises its
    own standing or erases a finding.
 
+## How Phase 3 works
+
+A team is an Ethne polity (`../../lib/ethne`, design D41). It cannot raise its
+badge, hide a finding, or expel its auditor.
+
+1. **The roster.** The team's root key signs a roster (`stele-team-v1`) that
+   lists each member's AT node, the release officers and the guardian edges.
+   Each node consents to being listed with its own AT key, so the root cannot
+   claim an outside node, such as an auditor, as a teammate. A listed member
+   sends the roster (`stele_ctl.py team`, verb `stele team`). A node holds the
+   newest one per team once the root signature and every consent verify.
+2. **Releases.** The roll confers `ReleaseOfficer`, and the officer signs each
+   release authorization (`stele-release-v1`) under its own key. The officer's
+   node advertises a version-3 ad that carries the authorization
+   (`stele_ctl.py advertise --polity --release`). The ad is the team's when the
+   authorization verifies under an officer the held roster lists. Attribution is
+   fixed once and never undone, so a shorter roster narrows the team from then
+   on and never unlists what it shipped.
+3. **Teammates do not witness.** Every node a team has ever listed goes into
+   AT's conflict set (`etc/at/attest_conflicts.cfg.json`, AT ISSUES §2.54;
+   the history is `etc/stele/conflicts.json`). A shorter roster never removes
+   anyone from the set. A
+   teammate does not co-sign an attestation about its team, is not counted
+   toward its quorum, and cannot be the verifier. The viewer re-checks every
+   record against its own copy of the roster.
+4. **Who answers.** A finding scores the officer's node, which owns the ad.
+   Once two verifiers confirm it, `stele_hook` lands it on the guardian of the
+   machine that built the release (a version-4 attestation, 0.45).
+5. **The team's standing** is the worst of its repositories' standings and its
+   members' own repositories' standings (`stele_view` `/team?polity=`,
+   `/teams?q=`; `stele_ctl.py team-standing`). The trust panel shows a team
+   line on a team repository and a team panel on the forge organization's page.
+
+`tools/stele_team.py` writes a team's roster and release files from a small
+spec. It founds the polity in an Ethne archive when an Ethne build with D41 is
+importable, and otherwise writes the same formats itself.
+
+## How Phase 4 works: profiles
+
+The chain records facts with reasons. "Safe enough" is a reading of those
+facts, and readers differ, so the viewer reads every standing under a
+**profile** (`viewer/stele_profile.py`) and names it in every answer.
+
+1. **What a profile sets.** How many counted verifiers must agree
+   (`replicas`) and the tier at which a verifier counts (`tier`); the
+   `scanner:channel` checks that must be present and confirmed clean
+   (`require`) and those set aside (`ignore`); the severity below which a
+   finding is a concern rather than a failure (`severity_floor`: low, medium
+   or high); how a clean reading fades (`onset_days`, `half_life_days`);
+   whether a repository stands no better than its team (`team`: show or
+   worst); and whether it stands no better than its worst dependency
+   (`deps`: show or worst, below).
+2. **Floors.** A profile tightens freely and relaxes only inside floors, and
+   one outside them is refused, never clamped: at least one counted verifier at
+   a real tier; a confirmed critical finding always fails, whatever the
+   severity floor or `ignore` says, and an unrated finding always counts; a
+   failure never fades; a required check that was never run is never green;
+   a standing with nothing counted is unknown. A set-aside check is still
+   shown, with the profile that set it aside.
+3. **Where profiles come from.** Built in: `stele-default` (Stele's own
+   reading, everything above) and `stele-strict` (three verifiers, the
+   osv-scanner, gitleaks and license checks required, a 14-day half-life, a
+   repository no better than its team or its worst dependency). Local: the viewer's
+   `etc/stele/profiles/NAME.json`, naming only what it changes. Followed: a
+   polity's signed profile (Ethne **D42**, border artifact #11), decided by
+   its roll under D37's rule (a majority to tighten, more than a majority to
+   loosen). `stele_ctl.py profile-follow` pins its issuer's key, and afterwards
+   only a higher `seq` from that key replaces it.
+4. **Which applies.** `--profile NAME|followed` (or `?profile=` on the HTTP
+   endpoints, or the trust panel's setting); else the viewer node's
+   `etc/stele/profile.json` (`stele_ctl.py profile-use`); else
+   `stele-default`. A choice that cannot be applied is an error (HTTP 400,
+   exit 2), never a silent fallback to another reading. A bundle may carry a
+   newer profile from the followed polity, taken for that answer only.
+
+`tools/stele_team.py profile SPEC OUT` writes a polity's signed profile from
+the spec's `profile` and `profile_seq`.
+
+## How Phase 4 works: the supply chain
+
+A repository is also what it is built from. Its standing lists its
+dependencies and, under a profile that says so, answers for the worst of them
+(`viewer/stele_deps.py`, `stele_view.py`).
+
+1. **The list is the owner's SBOM.** The ad pins the SBOM the owner committed
+   by sha256, and verifiers already check it on `certificate` against their own
+   syft SBOM of the commit: a dependency left out fails the repository itself.
+   The SBOM is content-addressed, so it may come from anywhere and is kept only
+   if its bytes hash to the digest: the verifier that checked it keeps it, the
+   owner's node keeps its own (`advertise --sbom`), a bundle carries it, and
+   `stele_ctl.py sbom-add FILE` or `sbom-fetch CLONE_URL` (Forgejo's raw path at
+   the ad's commit) gives it to a viewer.
+2. **A package resolves to the repositories that publish it.** A v4 ad says
+   which package its repository publishes as (`advertise --provides
+   pkg:golang/example.com/lib`, a purl without a version). Verifiers check the
+   claim against the repository's own manifest (go.mod, package.json,
+   Cargo.toml, pyproject.toml) on `certificate`, scanner `provides`, and a
+   claim counts once counted verifiers confirm it clean. The release read is
+   the ad whose ref names the version the dependent pins (`v1.2.0` or
+   `1.2.0`; a Go pseudo-version by its commit), with its own dependencies,
+   eight deep and never round a cycle.
+3. **Several claimants: the worst stands.** Anyone can write a go.mod, so a
+   squatter can publish the same package. Folding the worst of the claimants
+   means a squatter can lower a dependency and never raise it. The viewer's
+   answer to one is a **pin** (`stele_ctl.py deps-pin PURL CLONE_URL`, kept in
+   `etc/stele/deps-map.json`), which replaces every claimant of that package.
+4. **What Stele cannot read is shown, never folded.** A package no repository
+   on Stele publishes, a version no held ad names, a claim no counted verifier
+   confirmed, and an SBOM the viewer does not hold. The repository's own OSV
+   probe already covers the known vulnerabilities in those.
+5. **Show or worst.** Under `deps: show` (`stele-default`) the dependencies
+   are read beside the repository and change nothing. Under `deps: worst`
+   (`stele-strict`, or any profile that sets it) a repository stands no better
+   than its worst resolved dependency, and the answer says `capped_by_deps`.
+   Ethne's `SteleProfile` carries the field and writes it only when it is
+   `worst`, so a D42 profile signed before it keeps its bytes.
+
+## How Phase 4 works: discovery relays
+
+Discovery used to reach only what the reader's own AutonomousTrust group
+multicast. A **discovery relay** indexes claims from every group: an AT relay
+that also serves Stele's `stl_` op family (`at-stele/c/stele/stele_relay.h`,
+`AT_STELE_RELAY=1`). It indexes **verifiable claims, never authority**.
+
+1. **Anyone publishes.** Every node files what it holds (ads, attestations,
+   rebuttals, attested records, team rosters, group anchors, SBOMs) at the
+   relays it registers with, each time it registers and every
+   `AT_STELE_RELAY_REFILE_SEC` (120) after; `stele_ctl.py relay-publish` does it
+   now. The relay files each claim by its content and keeps anchors and rosters
+   by issuer, a higher seq replacing. So an owner cannot keep a finding out of
+   the index: the verifier and the auditor that hold it publish it too.
+2. **A record from another group verifies only under a followed anchor.** A
+   reader holds the keys of its own group and no other's. A polity's **group
+   anchor** (Ethne **D43**, border artifact #12) supplies them: the AT group its
+   work is verified in, each node's key, which the node consented to under that
+   key, its tier, and the checkpoints the group signed, all signed by the
+   polity's root. The polity's root mints it from one node's roster, at a rising
+   seq (`tools/stele_team.py anchor`; a node's consent is `stele_ctl.py
+   anchor-consent`; a node files it with `anchor-publish`). The reader follows a
+   polity with `stele_ctl.py anchor-follow`, pinning its root key. A verifier
+   then counts at the tier the anchor states, under the reader's own profile,
+   and the answer names the polity (`anchored_by`).
+3. **The relay's word is shown and never believed.** A search answer carries
+   the relay's own count of findings, clean scans and verifiers it holds,
+   unverified, beside what the reader verified. A repository from a group whose
+   polity the reader does not follow is listed and unverified.
+4. **Gaps are counted, not judged.** Under an anchor the answer says how many of
+   the checkpoints the group signed since the first record shown came with a
+   record about the repository. Most checkpoints hold no record about any one
+   repository, so a gap is shown and proves nothing.
+
+`stele_ctl.py relay-search` and `relay-fetch` ask every relay the node is
+connected to (the answers land in `etc/stele/relay/`); `relay-results` and
+`relay-standing` print what the viewer makes of them, as `stele_view`'s
+`/relay/search` and `/relay/standing` do. The trust panel asks the relays when
+the node has not heard of the repository on the page.
+
 ## Layout
 
 | Path | What |
@@ -112,14 +269,21 @@ panel green.
 | `at-stele/conformance/` | the `stele` conformance protocol: plug-in, C and Python adapters, scenarios |
 | `at-stele/test-conformance.sh` | AT's conformance run with stele plugged in |
 | `native/` | `steled` (the daemon) and `libstele_shim` (what `stele_ctl.py` drives) |
-| `tools/stele_ctl.py` | uuid, pubkey, advertise, attest (from a scanner report; `--replicates`), rebut, reputation, verify, standing, search (`--bundle`), bundle |
+| `tools/stele_ctl.py` | uuid, pubkey, advertise (`--polity --release` for a team release, `--provides` for a package), attest (from a scanner report; `--replicates`), rebut, reputation, verify, standing, search (`--bundle`, `--profile`), bundle, for teams consent, team, guardian, team-standing, for profiles profile-show, profile-follow, profile-unfollow, profile-use, and for the supply chain sbom-add, sbom-fetch, deps-pin, deps-unpin |
 | `verifier/stele_hook.py` | webhook → clone → the battery → attest, and replication of other verifiers' probes, on the verifier's host |
-| `verifier/scanners.py` | the battery: each scanner's runner and summary, the SBOM, license and claim checks |
+| `verifier/scanners.py` | the battery: each scanner's runner and summary, the SBOM, license, claim and provides checks |
 | `viewer/stele_view.py` | the per-repository standing from the viewer's node, over HTTP on 127.0.0.1 |
+| `viewer/stele_profile.py` | profiles: the built-ins, parsing inside the floors, severities, signed profiles and following |
+| `viewer/stele_deps.py` | the supply chain: purls, the content-addressed SBOM store, the viewer's pins |
 | `extension/` | the trust panel, a WebExtension for Chromium and Firefox |
 | `forge/` | Forgejo + runner (docker compose), a seeded vulnerable repo, the owner's own (unscored) CI scan, `up.sh` |
 | `test/cohort/stele_cohort.sh` | the live three-node check |
 | `test/cohort/stele_redteam.sh` | Phase 2's live check: the four owner attacks on a hostile instance (`lib.sh`, `forge_bundle.py`) |
+| `test/cohort/stele_team_redteam.sh` | Phase 3's live check: a team's attacks on its badge, its findings and its auditor |
+| `test/cohort/stele_relay_redteam.sh` | Phase 4's live check of discovery relays: two groups, a relay, omission, the relay's word, forgeries |
+| `viewer/stele_anchors.py` | other groups: the polities' group anchors this reader follows |
+| `at-stele/c/stele/stele_relay*.{h,c}` | the discovery relay: its store (`stl_` ops) and its network glue; Python twin `_python/relay.py` |
+| `tools/stele_team.py` | a team's roster, release authorizations and Stele profile, through Ethne when it is importable |
 
 ## Build
 
@@ -222,10 +386,86 @@ of the honest build's hash, which the founder reports. The phases:
 8. **Attack 3:** the owner withdraws, and the auditor's next finding commits
    without it;
 9. the fix: *single-source* on one verifier's scan, *verified-safe* once the
-   auditor replicates it.
+   auditor replicates it;
+10. profiles (Phase 4): the same fixed commit is *unknown* under
+   `stele-strict` (its required gitleaks and license checks never ran),
+   *single-source* under the observer's own three-verifier profile, and
+   *verified-safe* under a polity's signed profile the observer follows. A
+   second polity's profile is refused without `--replace`;
+11. the supply chain (Phase 4): the owner publishes `lib`, whose v4 ad
+   provides `example.com/lib`; both verifiers confirm the claim against its
+   go.mod and a finding against it. demo is released again with an SBOM naming
+   `lib@v1.0.0`. Nothing is listed until the observer holds the SBOM
+   (`sbom-add`, or `sbom-fetch` from Forgejo with `FORGE=1`); then lib is a
+   *failing* dependency beside a *verified-safe* demo, and a `deps: worst`
+   profile holds demo at *failing*. A squatter ad claiming the same package
+   from a repository whose go.mod names another module is refuted by both
+   verifiers, listed as unconfirmed and never folded, and the observer's pin
+   replaces every claimant.
 
 Knobs: `WAIT`, `WARM_WAIT`, `CHECKPOINT_SEC`, `TIER_REP` (0.80), `SUBNET`
 (10.9.13), `VIEW_PORT` (18199), `KEEP=1`, `FORGE=1`.
+
+### The team red team (Phase 3)
+
+```
+sudo -E env "PATH=$PATH" ./test/cohort/stele_team_redteam.sh
+FORGE=1 sudo -E env "PATH=$PATH" ./test/cohort/stele_team_redteam.sh
+```
+
+Six nodes take part: the team's officer, a teammate (`mate`), the team's build
+machine (`ci`, guarded by `mate`), a verifier, an auditor and an observer. The
+phases:
+
+1. discovery;
+2. the roster is held everywhere, and AT's conflict set names the team's three
+   nodes;
+3. the verifiers reach tier 3;
+4. the team's vulnerable release is attributed to the team, found and
+   replicated; it commits with the team's own nodes declining to witness. The
+   repository and the team are *failing*;
+5. the confirmed finding lands on the build machine's guardian (0.45) and is
+   the team's concern;
+6. **hide a finding / raise the badge:** a roster without the officer and the
+   machine changes nothing. The release stays the team's and failing;
+7. **expel the auditor:** a roster claiming the auditor with a forged consent is
+   refused by the officer's own node. The auditor stays outside the conflict
+   set and keeps counting;
+8. the fix: *single-source* on one verifier, *verified-safe* on two, and the
+   team with it.
+
+Knobs: as for the red team, plus `SUBNET` (10.9.14) and `STELE_TEAM_BUILTIN=1`
+(skip Ethne).
+
+### The relay red team (Phase 4)
+
+```
+sudo -E env "PATH=$PATH" ./test/cohort/stele_relay_redteam.sh
+```
+
+Seven nodes on three segments joined by a router, so discovery stays in each
+group and the relay is reached over TCP: group A (`owner`, `verifier`,
+`auditor`, a team whose polity mints the anchor), group B (`viewer`, `b1`,
+`b2`, the reader's own group) and the `relay`. The phases:
+
+1. two groups and a relay; neither group holds the other's nodes;
+2. group A's verifier and auditor reach tier 3;
+3. a confirmed finding in group A, archived under a checkpoint;
+4. the polity mints its group anchor from the owner's roster and the owner
+   publishes it; the viewer follows the polity;
+5. **omission:** the owner publishes with the finding left out; through the
+   relay the repository reads *unknown*, never green;
+6. **anyone publishes:** the auditor files what it holds; the viewer reads
+   *failing*, agreed by 2, under the polity's anchor;
+7. **the relay's word:** a node of group B files a clean scan it made up; the
+   relay counts it, labelled as its word, and the viewer still reads failing;
+8. **forgery:** an anchor edited after signing is not followed, and records
+   edited after certification do not verify;
+9. **unfollowed:** with the polity unfollowed, the repository is listed and
+   nothing about it verifies.
+
+Knobs: `WAIT`, `WARM_WAIT`, `CHECKPOINT_SEC`, `TIER_REP`, `NET` (10.9; segments
+.15, .16 and .17), `KEEP=1`.
 
 ## The verifier's battery
 
@@ -256,8 +496,10 @@ python3 viewer/stele_view.py --root VIEWER_ROOT        # http://127.0.0.1:8099
 Opening that address in a browser gives a page that searches what the node
 has heard and looks up the standing of a clone URL. The extension uses
 `/standing` and `/search` directly, and `POST /verify` when the repository
-publishes a bundle. `--replicas N` (2) and `--tier T` (3) set how many counted
-verifiers must agree, and the tier at which a verifier counts.
+publishes a bundle. `--profile NAME|followed` sets the profile standings are
+read under (see "How Phase 4 works"), and `--replicas N` and `--tier T`
+override the profile's agreement and tier; an override is named in every
+answer.
 
 Then load `extension/` unpacked. One manifest serves both browsers. In
 Chromium, open `chrome://extensions`, turn on developer mode and choose "Load
@@ -265,7 +507,10 @@ unpacked". In Firefox (140 or later), open `about:debugging`, choose "This
 Firefox", then "Load Temporary Add-on", and pick `extension/manifest.json`.
 Firefox does not grant an extension's site access at install, so open the
 toolbar popup once and press "Grant access". Until then the panel cannot
-appear on any page. The popup's settings take another port.
+appear on any page. The popup's settings take another port, and a profile to
+read standings under (blank leaves it to the node). The panel names the
+profile, shows each set-aside check with its reason, and re-checks the floors
+itself.
 
 On a Forgejo or Gitea repository's home page the panel reads the clone URL,
 from the `go-import` meta or, on Forgejo (which serves that meta only for

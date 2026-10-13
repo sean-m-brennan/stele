@@ -1,0 +1,42 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-team-ad-not-an-officer-is-solo
+byte_pinning: false
+description: |
+    A release authorized by a member who is not a release officer does not
+    make an ad the team's (Phase 3).
+
+    carol is on the team but does not hold ReleaseOfficer. She advertises a
+    commit with an authorization she signed herself. bob holds the ad, since it
+    is carol's first-person ad, but not as the team's: a member cannot ship in
+    the team's name what the team did not authorize.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: owner
+
+fixtures:
+  stele_team:
+    members: [alice, carol]
+    officers: [alice]
+  stele_teams_held: [bob]
+
+steps:
+  - id: 1
+    from: carol
+    to: bob
+    function: stele repo
+    payload:
+      team: true
+      release_signer: carol
+    description: carol advertises a release she authorized herself.
+
+expected_state:
+  bob:
+    stele_ads_held: 1
+    stele_team_ads: 0

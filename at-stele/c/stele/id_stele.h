@@ -44,6 +44,13 @@ void stele_hold_ad_for_test(const stele_repo_ad_t *ad);
 
 /* [{owner, attestation_id, id}]; caller owns. */
 json_t *stele_held_rebuttals_json(void);
+/* The team rosters held: [{issuer, seq, nodes: [uuid, ...]}]. Held ads carry
+ * {"team": {polity, officer, guardian, guardian_uuid}} once attributed. */
+json_t *stele_held_teams_json(void);
+/* Hold a roster as if it had arrived verified, consents unchecked. */
+void stele_hold_team_for_test(const char *text);
+/* Attribute every held v3 ad the held rosters account for. */
+void stele_attribute_held_for_test(void);
 
 /* Forget what is held and reload it from the store, as a restart does. */
 void stele_reload_for_test(void);

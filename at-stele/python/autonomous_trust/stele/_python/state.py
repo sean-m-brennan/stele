@@ -21,6 +21,7 @@ ADS_CAP = 256
 ATTEST_CAP = 256
 REBUT_CAP = 256
 SCORES_CAP = 64
+TEAMS_CAP = 16
 
 
 class SteleState:
@@ -30,6 +31,8 @@ class SteleState:
         self.rebuttals: dict = {}      # rebuttal id -> rebuttal (dict)
         self.scores_sent: list = []    # [{subject, score, digest}]
         self.ad_seq = 0
+        self.teams: dict = {}          # issuer -> the newest roster (team.parse_team)
+        self.attributions: dict = {}   # ad id -> who answers for a team release
 
     def hold(self, table: dict, key: str, item: dict, cap: int) -> bool:
         if key in table:

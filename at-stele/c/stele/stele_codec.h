@@ -39,7 +39,25 @@
  * replication channel, again under its own tag:
  *   "STELE-ATTEST3\0" <the v2 fields> "|" replicates
  *
- * The envelope says which with "v": 2 or 3; an envelope without it is v1. A third
+ * Version 3 of the AD and version 4 of the ATTESTATION (Phase 3, teams) follow
+ * the same rule:
+ *   "STELE-REPO3\0" <the v2 ad fields> "|" polity "|" release_digest
+ *   "STELE-ATTEST4\0" <the v2 attestation fields> "|" attributes "|" guardian_of
+ * A v3 ad says a team (polity: its root key, hex) released this commit, and
+ * carries the officer's release authorization in its envelope; the canonical
+ * form binds it by its blake2b-256 digest (stele_team.h). A v4 attestation
+ * lands a finding on the guardian of the machine that built a team release: it
+ * names the finding it attributes and the machine's DID.
+ *
+ * Version 4 of the AD (Phase 4, supply chain) names the package the repo
+ * publishes as, so a dependent's SBOM can be joined to it:
+ *   "STELE-REPO4\0" <the v2 ad fields> "|" polity "|" release_digest "|" provides
+ * A v4 ad is solo or a team release: polity and release_auth are both empty or
+ * both set (the release digest is empty with them). `provides` is a versionless
+ * purl, "pkg:" type "/" [namespace "/"] name, or empty; a verifier checks it
+ * against the repo's manifest on the certificate channel (scanner "provides").
+ *
+ * The envelope says which with "v"; an envelope without it is v1. A third
  * artifact, the REBUTTAL, is the owner's signed reply to an attestation (see
  * stele_rebuttal_t).
  *
@@ -71,7 +89,7 @@
 #define STELE_ID_HEX        64
 #define STELE_SIG_HEX       (crypto_sign_BYTES * 2)
 #define STELE_PK_HEX        (crypto_sign_PUBLICKEYBYTES * 2)
-#define STELE_CANON_MAX     1024
+#define STELE_CANON_MAX     2048   /* a v4 ad at every field's maximum is ~1.6K */
 #define STELE_UUID_STR      37     /* canonical uuid + NUL */
 
 #define STELE_VERDICT_CLEAN "clean"
@@ -96,6 +114,14 @@
  * names the attestation it replicates. Only v3 may be on this channel. */
 #define STELE_CHANNEL_REPLICATION      "replication"
 
+/* Version 3 ad (Phase 3): a team release. */
+#define STELE_RELEASE_TEXT_MAX 2048
+#define STELE_DID_TEXT_MAX     64
+
+/* Version 4 ad (Phase 4): the package the repo publishes as. */
+#define STELE_PROVIDES_MAX     128
+#define STELE_SCANNER_PROVIDES "provides"
+
 typedef struct {
     uuid_t  owner;
     char    name[STELE_NAME_MAX + 1];
@@ -105,12 +131,17 @@ typedef struct {
     int64_t seq;
     int64_t ts;
     /* v2 (version == 2); ignored for v1 */
-    int     version;                     /* 1 or 2; 0 reads as 1 */
+    int     version;                     /* 1..4; 0 reads as 1 */
     char    description[STELE_DESC_MAX + 1];
     char    topics[STELE_TOPICS_MAX + 1];
     char    sbom_digest[STELE_DIGEST_HEX + 1];   /* "" for none */
     char    sbom_path[STELE_PATH_MAX + 1];       /* "" for none */
     char    claim_verdict[8];                    /* clean | vuln | none */
+    /* v3: a team release; v4: a team release when set, else both empty */
+    char    polity[STELE_PK_HEX + 1];            /* the team's root key, hex */
+    char    release_auth[STELE_RELEASE_TEXT_MAX + 1];   /* the file's exact text */
+    /* v4: the versionless purl the repo publishes as, "" for none */
+    char    provides[STELE_PROVIDES_MAX + 1];
 } stele_repo_ad_t;
 
 typedef struct {
@@ -132,6 +163,10 @@ typedef struct {
     /* v3: the id of the attestation this one replicates; set exactly when the
      * channel is "replication", "" otherwise */
     char    replicates[STELE_ID_HEX + 1];
+    /* v4: the finding this attestation attributes to a builder's guardian, and
+     * the builder machine's DID; set exactly when version == 4 */
+    char    attributes[STELE_ID_HEX + 1];
+    char    guardian_of[STELE_DID_TEXT_MAX + 1];
 } stele_attestation_t;
 
 /* The repo owner's signed reply to an attestation about one of its repos.
@@ -149,6 +184,11 @@ typedef struct {
  * a commit and the digests lowercase hex of their length, a known verdict and
  * a count that agrees with it (clean == 0). */
 bool stele_repo_ad_valid(const stele_repo_ad_t *ad);
+/* A team release: a v3 ad, or a v4 ad that names a polity. */
+bool stele_repo_ad_is_team(const stele_repo_ad_t *ad);
+/* A versionless purl: "pkg:" type "/" [namespace "/"] name, at most
+ * STELE_PROVIDES_MAX bytes, with no version, qualifier, subpath or space. */
+bool stele_purl_base_ok(const char *s);
 bool stele_attestation_valid(const stele_attestation_t *at);
 bool stele_rebuttal_valid(const stele_rebuttal_t *rb);
 
@@ -158,6 +198,10 @@ bool stele_rebuttal_valid(const stele_rebuttal_t *rb);
  * repeat about the same commit is capped (AT reputation.md). 0 on success. */
 int stele_scope(const uuid_t owner, const char *name, const char *commit,
                 const char *scanner, char out[STELE_DIGEST_HEX + 1]);
+
+/* The digest a v3 ad's canonical form binds its release authorization by:
+ * lowercase-hex blake2b-256 of the file's exact text. 0 on success. */
+int stele_release_digest(const char *release_auth, char out[STELE_DIGEST_HEX + 1]);
 
 /* Canonical bytes into @p out; returns the length, or 0 when invalid. */
 size_t stele_repo_ad_canonical(const stele_repo_ad_t *ad, uint8_t *out, size_t cap);

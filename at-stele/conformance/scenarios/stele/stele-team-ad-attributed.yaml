@@ -1,0 +1,42 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-team-ad-attributed
+byte_pinning: false
+description: |
+    A version-3 ad is the team's when its release authorization verifies under
+    an officer the held roster lists, and the ad comes from that officer's node
+    (Phase 3).
+
+    alice holds ReleaseOfficer in the team whose roster bob holds. She
+    advertises a commit with her signed authorization of it. bob holds the ad
+    and attributes it to the team; a finding against it then lands on alice's
+    node as before, and on the team's standing in the viewer.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: owner
+
+fixtures:
+  stele_team:
+    members: [alice, carol]
+    officers: [alice]
+  stele_teams_held: [bob]
+
+steps:
+  - id: 1
+    from: alice
+    to: bob
+    function: stele repo
+    payload:
+      team: true
+    description: alice advertises a team release.
+
+expected_state:
+  bob:
+    stele_ads_held: 1
+    stele_team_ads: 1

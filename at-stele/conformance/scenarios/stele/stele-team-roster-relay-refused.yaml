@@ -1,0 +1,36 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-team-roster-relay-refused
+byte_pinning: false
+description: |
+    A roster is accepted only from one of the nodes it lists (Phase 3).
+
+    Stele relays nothing: an ad comes from its owner, an attestation from its
+    verifier, and a roster from a member of the team. dave, who is not listed,
+    forwards a well-formed roster, and bob refuses it.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: dave
+    role: verifier
+
+fixtures:
+  stele_team:
+    members: [alice]
+    officers: [alice]
+
+steps:
+  - id: 1
+    from: dave
+    to: bob
+    function: stele team
+    payload: {}
+    description: dave forwards alice's team roster.
+
+expected_state:
+  bob:
+    stele_teams_held: 0

@@ -92,6 +92,55 @@ int stele_attest3(const char *send_queue, const char *owner, const char *commit,
                             channel, url, replicates);
 }
 
+int stele_publish_team(const char *send_queue, const char *roster)
+{
+    return at_stele_publish_team(send_queue, roster);
+}
+
+int stele_advertise_repo3(const char *send_queue, const char *name, const char *url,
+                          const char *ref, const char *commit, int64_t seq,
+                          const char *description, const char *topics,
+                          const char *sbom_digest, const char *sbom_path,
+                          const char *claim_verdict, const char *polity,
+                          const char *release_auth)
+{
+    return at_stele_advertise_repo3(send_queue, name, url, ref, commit, seq, description,
+                                    topics, sbom_digest, sbom_path, claim_verdict,
+                                    polity, release_auth);
+}
+
+int stele_advertise_repo4(const char *send_queue, const char *name, const char *url,
+                          const char *ref, const char *commit, int64_t seq,
+                          const char *description, const char *topics,
+                          const char *sbom_digest, const char *sbom_path,
+                          const char *claim_verdict, const char *polity,
+                          const char *release_auth, const char *provides)
+{
+    return at_stele_advertise_repo4(send_queue, name, url, ref, commit, seq, description,
+                                    topics, sbom_digest, sbom_path, claim_verdict,
+                                    polity, release_auth, provides);
+}
+
+int stele_relay_search(const char *send_queue, const char *q)
+{
+    return at_stele_relay_search(send_queue, q);
+}
+
+int stele_relay_fetch(const char *send_queue, const char *url)
+{
+    return at_stele_relay_fetch(send_queue, url);
+}
+
+int stele_relay_publish(const char *send_queue)
+{
+    return at_stele_relay_publish(send_queue);
+}
+
+int stele_attest_guardian(const char *send_queue, const char *attributes)
+{
+    return at_stele_attest_guardian(send_queue, attributes);
+}
+
 int stele_rebut(const char *send_queue, const char *attestation_id, const char *text)
 {
     return at_stele_rebut(send_queue, attestation_id, text);

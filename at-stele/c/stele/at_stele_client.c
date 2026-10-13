@@ -145,3 +145,89 @@ int at_stele_rebut(const char *q_out, const char *attestation_id, const char *te
                       json_pack("{s:s, s:s}", "attestation_id", attestation_id,
                                 "text", text));
 }
+
+int at_stele_publish_team(const char *q_out, const char *roster)
+{
+    if (roster == NULL)
+        return -1;
+    return _send_verb(q_out, AT_APP_STELE_PUBLISH_TEAM,
+                      json_pack("{s:s}", "roster", roster));
+}
+
+int at_stele_advertise_repo3(const char *q_out, const char *name, const char *url,
+                             const char *ref, const char *commit, int64_t seq,
+                             const char *description, const char *topics,
+                             const char *sbom_digest, const char *sbom_path,
+                             const char *claim_verdict, const char *polity,
+                             const char *release_auth)
+{
+    if (name == NULL || url == NULL || ref == NULL || commit == NULL || polity == NULL
+        || release_auth == NULL)
+        return -1;
+    return _send_verb(q_out, AT_APP_STELE_ADVERTISE_REPO,
+                      json_pack("{s:s, s:s, s:s, s:s, s:I, s:s, s:s, s:s, s:s, s:s, s:s, s:s}",
+                                "name", name, "url", url, "ref", ref, "commit", commit,
+                                "seq", (json_int_t)seq,
+                                "description", _or_empty(description),
+                                "topics", _or_empty(topics),
+                                "sbom_digest", _or_empty(sbom_digest),
+                                "sbom_path", _or_empty(sbom_path),
+                                "claim_verdict", claim_verdict != NULL ? claim_verdict
+                                                                       : "none",
+                                "polity", polity, "release_auth", release_auth));
+}
+
+int at_stele_advertise_repo4(const char *q_out, const char *name, const char *url,
+                             const char *ref, const char *commit, int64_t seq,
+                             const char *description, const char *topics,
+                             const char *sbom_digest, const char *sbom_path,
+                             const char *claim_verdict, const char *polity,
+                             const char *release_auth, const char *provides)
+{
+    if (name == NULL || url == NULL || ref == NULL || commit == NULL || provides == NULL)
+        return -1;
+    json_t *env = json_pack("{s:s, s:s, s:s, s:s, s:I, s:s, s:s, s:s, s:s, s:s, s:s}",
+                            "name", name, "url", url, "ref", ref, "commit", commit,
+                            "seq", (json_int_t)seq,
+                            "description", _or_empty(description),
+                            "topics", _or_empty(topics),
+                            "sbom_digest", _or_empty(sbom_digest),
+                            "sbom_path", _or_empty(sbom_path),
+                            "claim_verdict", claim_verdict != NULL ? claim_verdict
+                                                                   : "none",
+                            "provides", provides);
+    /* A solo release names no polity; a team release names both. */
+    if (env != NULL && polity != NULL && polity[0] != '\0')
+    {
+        json_object_set_new(env, "polity", json_string(polity));
+        json_object_set_new(env, "release_auth", json_string(_or_empty(release_auth)));
+    }
+    return _send_verb(q_out, AT_APP_STELE_ADVERTISE_REPO, env);
+}
+
+int at_stele_relay_search(const char *q_out, const char *q)
+{
+    if (q == NULL)
+        return -1;
+    return _send_verb(q_out, AT_APP_STELE_RELAY_SEARCH, json_pack("{s:s}", "q", q));
+}
+
+int at_stele_relay_fetch(const char *q_out, const char *url)
+{
+    if (url == NULL)
+        return -1;
+    return _send_verb(q_out, AT_APP_STELE_RELAY_FETCH, json_pack("{s:s}", "url", url));
+}
+
+int at_stele_relay_publish(const char *q_out)
+{
+    return _send_verb(q_out, AT_APP_STELE_RELAY_PUBLISH, json_object());
+}
+
+int at_stele_attest_guardian(const char *q_out, const char *attributes)
+{
+    if (attributes == NULL)
+        return -1;
+    return _send_verb(q_out, AT_APP_STELE_ATTEST,
+                      json_pack("{s:s}", "attributes", attributes));
+}

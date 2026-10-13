@@ -9,11 +9,11 @@ import vm from 'node:vm';
 const here = new URL('..', import.meta.url);
 const src = f => readFileSync(new URL(f, here), 'utf8');
 
-function worker(fetchImpl) {
+function worker(fetchImpl, stored = {}) {
   const badges = {};
   let listener;
   const chrome = {
-    storage: { local: { get: async d => d } },
+    storage: { local: { get: async d => Object.assign({}, d, stored) } },
     action: {
       setBadgeText: ({ tabId, text }) => { badges[tabId] = text; },
       setBadgeBackgroundColor: () => {}, setTitle: () => {},
@@ -51,8 +51,9 @@ test('both URL spellings are asked before saying unheard', async () => {
   const w = worker(async u => { asked.push(u); return { status: 404, ok: false }; });
   const r = await w.send({ type: 'standing', url: 'http://f/a/b.git' });
   assert.equal(r.standing.heard, false);
-  assert.equal(asked.length, 2);
-  assert.match(asked[1], /url=http%3A%2F%2Ff%2Fa%2Fb$/);
+  assert.equal(asked.length, 4);              // both spellings, then both at the relays
+  assert.match(asked[1], /\/standing\?url=http%3A%2F%2Ff%2Fa%2Fb$/);
+  assert.match(asked[2], /\/relay\/standing\?url=/);
 });
 
 test('a failing standing badges red, whatever else it claims', async () => {
@@ -78,4 +79,43 @@ test('a bundle goes to the node to verify, never straight to the badge', async (
   assert.deepEqual(JSON.parse(calls[0].body), forged);
   assert.equal(r.standing.bundle.unverified, 1);
   assert.equal(w.badges[7], '!');
+});
+
+test('the chosen profile is asked for, and a bad name is never sent', async () => {
+  const asked = [];
+  const fetchImpl = async url => { asked.push(url); return { status: 404, ok: false }; };
+  await worker(fetchImpl, { profile: 'stele-strict' }).send(
+    { type: 'standing', url: 'http://f/a/b.git' });
+  assert.ok(asked[0].endsWith('&profile=stele-strict'), asked[0]);
+  asked.length = 0;
+  await worker(fetchImpl, { profile: 'x&evil=1' }).send({ type: 'search', q: 'a' });
+  assert.ok(!asked[0].includes('profile='), asked[0]);
+  asked.length = 0;
+  await worker(fetchImpl).send({ type: 'search', q: 'a' });
+  assert.ok(!asked[0].includes('profile='), asked[0]);
+});
+
+test('a repository the node never heard of is asked of its relays, and verified there', async () => {
+  const asked = [];
+  const w = worker(async u => {
+    asked.push(u);
+    if (!u.includes('/relay/')) return { status: 404, ok: false };
+    return { status: 200, ok: true, json: async () => ({
+      relays: [{ relay: '10.0.0.9:27790', verified: 2 }],
+      standing: { state: 'failing', checks: [{ verdict: 'vuln', state: 'confirmed-finding' }],
+                  anchored_by: { polity: 'did:key:zP', tiers: 'tiers as did:key:zP reads them' } } }) };
+  });
+  const r = await w.send({ type: 'standing', url: 'http://f/a/b.git' });
+  assert.equal(r.standing.relays, 1);
+  assert.equal(w.badges[7], '!');
+  assert.match(asked[2], /\/relay\/standing\?url=/);
+});
+
+test('relay search results carry the relays word and no green of their own', async () => {
+  const w = worker(json(200, { results: [
+    { repo: { name: 'x' }, reason: 'group not followed',
+      relays: [{ relay: 'r:1', findings: 0, clean: 9, verifiers: 3 }] }] }));
+  const r = await w.send({ type: 'relay-search', q: 'x' });
+  assert.equal(r.results[0].level, 'unverified');
+  assert.match(r.results[0].lines[0].text, /The relay r:1 says: 0 finding\(s\), 9 clean.*not verified/);
 });

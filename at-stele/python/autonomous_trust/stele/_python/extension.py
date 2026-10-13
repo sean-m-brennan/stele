@@ -38,7 +38,10 @@ def _register(proc, proc_name: str) -> None:
                       handlers.handle_app_advertise_repo),
                      (SteleProtocol.app_attest, handlers.handle_app_attest),
                      (SteleProtocol.rebut, handlers.handle_rebut),
-                     (SteleProtocol.app_rebut, handlers.handle_app_rebut)):
+                     (SteleProtocol.app_rebut, handlers.handle_app_rebut),
+                     (SteleProtocol.team, handlers.handle_team),
+                     (SteleProtocol.app_publish_team,
+                      handlers.handle_app_publish_team)):
         proc.protocol.register_handler(verb, functools.partial(fn, proc))
 
 
@@ -48,5 +51,6 @@ EXTENSION = Extension(
     register_handlers=_register,
     app_verbs=((SteleProtocol.app_advertise_repo, 'identity'),
                (SteleProtocol.app_attest, 'identity'),
-               (SteleProtocol.app_rebut, 'identity')),
+               (SteleProtocol.app_rebut, 'identity'),
+               (SteleProtocol.app_publish_team, 'identity')),
 )

@@ -1,0 +1,65 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-attest-guardian-scores
+byte_pinning: false
+description: |
+    A finding against a team release built by a machine lands on the machine's
+    guardian too, at 0.45 (Phase 3).
+
+    erin is the team's build machine, and carol is her guardian. alice, the
+    release officer, authorized the release as built by erin. dave found a
+    vulnerability in it. bob lands that finding on carol, the human who answers
+    for the machine, with a weaker score than the finding itself: the guardian
+    answers for the machine, not for the code. A team cannot dissolve
+    accountability by shipping from a box nobody owns.
+
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: owner
+  - id: dave
+    role: verifier
+  - id: erin
+    role: owner
+
+fixtures:
+  stele_team:
+    members: [alice, carol, erin]
+    officers: [alice]
+    guardians:
+      - machine: erin
+        guardian: carol
+  stele_teams_held: [bob]
+  stele_attestations:
+    bob:
+      - verifier: dave
+        ad_owner: alice
+        team: true
+        built_by: erin
+        verdict: vuln
+        count: 2
+
+steps:
+  - id: 1
+    from: bob
+    to: bob
+    function: trigger_stele_attest
+    payload:
+      attributes:
+        verifier: dave
+        ad_owner: alice
+        team: true
+        built_by: erin
+        verdict: vuln
+        count: 2
+    description: bob attributes dave's finding to the builder's guardian.
+
+expected_state:
+  bob:
+    stele_scores:
+      - subject: carol
+        score: 0.45

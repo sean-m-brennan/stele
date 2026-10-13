@@ -1,0 +1,67 @@
+schema_version: "1"
+kind: scenario
+protocol: stele
+name: stele-relay-rate-limited
+byte_pinning: false
+description: |
+    A relay answers each registrant at most its rate of ops a minute; another
+    registrant has its own allowance.
+participants:
+  - id: alice
+    role: owner
+  - id: bob
+    role: verifier
+  - id: carol
+    role: relay
+
+steps:
+  - id: 1
+    from: alice
+    to: carol
+    function: trigger_stele_relay
+    payload:
+      as: alice
+      op: stl_search
+      rate: 2
+      req:
+        q: demo
+    description: alice stl_search.
+  - id: 2
+    from: alice
+    to: carol
+    function: trigger_stele_relay
+    payload:
+      as: alice
+      op: stl_search
+      req:
+        q: demo
+    description: alice stl_search.
+  - id: 3
+    from: alice
+    to: carol
+    function: trigger_stele_relay
+    payload:
+      as: alice
+      op: stl_search
+      req:
+        q: demo
+    description: alice stl_search.
+  - id: 4
+    from: bob
+    to: carol
+    function: trigger_stele_relay
+    payload:
+      as: bob
+      op: stl_search
+      req:
+        q: demo
+    description: bob stl_search.
+
+expected_state:
+  carol:
+    stele_relay_replies:
+      - op: stl_results
+      - op: stl_results
+      - op: stl_limited
+        reason: rate
+      - op: stl_results

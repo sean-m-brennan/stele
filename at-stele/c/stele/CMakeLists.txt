@@ -22,14 +22,22 @@
 at_extension_library(stele
     SOURCES
         stele_codec.c
+        stele_team.c
+        stele_anchor.c
+        stele_relay.c
+        stele_relay_net.c
         id_stele.c
         at_stele_client.c
+    DEPENDS rendezvous
 )
 
 install(FILES at_stele.h DESTINATION include/autonomous_trust)
 
 at_extension_tests(stele
     stele_codec_test
+    stele_team_test
+    stele_anchor_test
+    stele_relay_test
     id_stele_test
 )
 

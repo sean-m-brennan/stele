@@ -131,3 +131,53 @@ def test_v3_field_rules_and_envelope():
     assert codec.from_envelope(missing, codec.ATTEST_KEYS) is None
     assert codec.from_envelope(dict(at, v=4, sig='00' * 64), codec.ATTEST_KEYS) is None
     assert codec.from_envelope(dict(AD2, v=3, sig='00' * 64), codec.AD_KEYS) is None
+
+
+AD4 = dict(AD2, v=4, polity='', release_auth='',
+           provides='pkg:golang/forge.local/alice/demo')
+
+
+def test_v4_fixed_vector():
+    """A solo v4 ad names the package it provides under STELE-REPO4, with the
+    team fields empty (c/stele/test/stele_codec_test.c holds the same id)."""
+    canon = codec.repo_ad_canonical(AD4)
+    assert canon.startswith(b'STELE-REPO4\x00') and canon.endswith(
+        b'||pkg:golang/forge.local/alice/demo')
+    assert codec.repo_ad_id(AD4) == \
+        'a406d340c5f37d28ff8e1384f5d4bdb50892a0ab76c95d513ba317f9a3d8489c'
+    assert not codec.is_team_ad(AD4)
+    assert codec.is_team_ad(dict(AD4, polity='aa' * 32, release_auth='x'))
+
+
+def test_v4_field_rules_and_envelope():
+    assert codec.repo_ad_valid(AD4)
+    assert codec.repo_ad_valid(dict(AD4, provides=''))
+    assert codec.repo_ad_valid(dict(AD4, provides='pkg:npm/left-pad'))
+    for bad in ('pkg:golang/forge.local/alice/demo@v1.0.0',   # a version
+                'pkg:npm/left-pad?arch=x86',                   # a qualifier
+                'pkg:npm/left-pad#lib',                        # a subpath
+                'pkg:NPM/left-pad', 'pkg:npm/', 'pkg:npm', 'npm/left-pad',
+                'pkg:npm/a//b', 'pkg:npm/a/', 'pkg:npm/left pad',
+                'pkg:npm/' + 'a' * 121):                       # 129 bytes
+        assert not codec.repo_ad_valid(dict(AD4, provides=bad)), bad
+    # The team fields come together or not at all.
+    assert not codec.repo_ad_valid(dict(AD4, release_auth='x'))
+    assert not codec.repo_ad_valid(dict(AD4, polity='aa' * 32))
+    assert codec.repo_ad_valid(dict(AD4, polity='aa' * 32, release_auth='x'))
+    back, _ = codec.from_envelope(dict(AD4, sig='00' * 64), codec.AD_KEYS)
+    assert back == AD4
+    missing = dict(AD4, sig='00' * 64)
+    del missing['provides']
+    assert codec.from_envelope(missing, codec.AD_KEYS) is None
+
+
+def test_every_valid_ad_fits_the_c_canonical_form():
+    """A v4 ad at every field's maximum still fits STELE_CANON_MAX, so the C
+    twin never refuses bytes this side signed."""
+    big = dict(AD4, name='n' * 64, url='u' * 256, ref='r' * 64, commit='a' * 64,
+               seq=2 ** 63 - 1, ts=2 ** 63 - 1, description='d' * 256,
+               topics='t' * 128, sbom_path='p' * 256, claim_verdict='clean',
+               polity='aa' * 32, release_auth='x' * 2048,
+               provides='pkg:npm/' + 'a' * 120)
+    assert codec.repo_ad_valid(big)
+    assert len(codec.repo_ad_canonical(big)) <= codec.CANON_MAX
