@@ -180,6 +180,9 @@ static int supervise(pid_t daemon_pid)
     return 0;
 }
 
+/* Seconds of membership before a verifier can count (see main). */
+#define STELE_MIN_TENURE_DEFAULT "3600"
+
 int main(int argc, char **argv)
 {
     /* steled IS a Stele node: keep libat_stele in the link (present means on;
@@ -215,6 +218,18 @@ int main(int argc, char **argv)
      * running subsystems with no identity. Idempotent across restarts. */
     if (ensure_config() != 0)
         return 1;
+
+    /* A member counts as a verifier only once this node has held it for an
+     * hour (AT's tenure gate, doc/architecture/reputation.md "Tenure"): a
+     * sybil that answers AT's probes honestly reaches tier 4 in seconds
+     * (red team rt-3717776), and tier 3 is what replication and counting
+     * need. AT's own default is off. Never overrides the environment, so an
+     * operator or a cohort can set its own. */
+    if (setenv("AT_REP_MIN_TENURE_SEC", STELE_MIN_TENURE_DEFAULT, 0) != 0) {
+        fprintf(stderr, "steled: setenv AT_REP_MIN_TENURE_SEC failed: %s\n",
+                strerror(errno));
+        return 1;
+    }
 
     /* Forward the Dart supervisor's stop to the detached node (see supervise()). */
     struct sigaction sa;

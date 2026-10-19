@@ -58,6 +58,8 @@
 #   CHECKPOINT_SEC (default 20), RESCORE_SEC (default 5), TIER_REP (default
 #   0.80), NET (the first two octets, default 10.9; segments .15 .16 .17),
 #   BUILD_DIR, LOG_LEVEL, KEEP=1.
+#   MIN_TENURE (AT_REP_MIN_TENURE_SEC, default 300: a member holds at most
+#   tier 2 until a node has held it that long; steled's own default is 3600).
 
 set -u
 

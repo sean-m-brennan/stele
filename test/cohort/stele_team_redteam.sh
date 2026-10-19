@@ -65,6 +65,8 @@
 # Environment: WAIT (default 180), WARM_WAIT (900), CHECKPOINT_SEC (20),
 #   RESCORE_SEC (5), TIER_REP (0.80), SUBNET (10.9.14), BUILD_DIR, LOG_LEVEL,
 #   KEEP=1, FORGE=1, STELE_TEAM_BUILTIN=1 (skip Ethne).
+#   MIN_TENURE (AT_REP_MIN_TENURE_SEC, default 300: a member holds at most
+#   tier 2 until a node has held it that long; steled's own default is 3600).
 
 set -u
 

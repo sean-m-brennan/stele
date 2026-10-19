@@ -118,6 +118,7 @@ node_start() { # name
     AT_PEER_NAME="$n" AT_PEER_SEED="stele-$n" \
     AT_REP_CHECKPOINT_SEC="$CHECKPOINT_SEC" \
     AT_REP_RESCORE_SEC="$RESCORE_SEC" \
+    AT_REP_MIN_TENURE_SEC="${MIN_TENURE:-300}" \
     "${floor[@]}" "${extra[@]}" \
     LD_LIBRARY_PATH="$libs:${LD_LIBRARY_PATH:-}" \
     "$STELED" extern_to_at at_to_extern "$LOG_LEVEL" \

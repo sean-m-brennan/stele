@@ -60,6 +60,10 @@
 #      probe and a clean replication: the replication is refused below tier
 #      3, the shill is not counted, and the standing is still failing, not
 #      disputed. The owner's attestation about itself never commits.
+#      7b. AT §2.48, the late joiner: the shill joined a group whose attested
+#      history was certified while it was smaller. The shill holds that
+#      history, no honest node's chain is rejected once it has joined, and
+#      checkpoints keep finalizing. (Found here in rt-1520252, phase 8.)
 #   8. ATTACK 3, firing the auditor: in a solo repository's group the owner
 #      cannot expel anyone, so it withdraws: its node stops. The auditor
 #      attests a further finding, which commits on the others' quorum. (A
@@ -96,6 +100,8 @@
 #   CHECKPOINT_SEC (default 20), RESCORE_SEC (default 5), TIER_REP (the tier-3
 #   floor phase 2 waits for, default 0.80), SUBNET (default 10.9.13),
 #   BUILD_DIR, LOG_LEVEL, KEEP=1, FORGE=1, VIEW_PORT (default 18199).
+#   MIN_TENURE (AT_REP_MIN_TENURE_SEC, default 300: a member holds at most
+#   tier 2 until a node has held it that long; steled's own default is 3600).
 
 set -u
 
@@ -184,6 +190,11 @@ records_about() { # node subject -> count of verified records
   ctl verify "${ROOT[$1]}" "$2" >"$RUN/records-$1.json" 2>/dev/null
   python3 -c "import json,sys; print(sum(r['verified'] for r in json.load(open(sys.argv[1]))['records']))" \
     "$RUN/records-$1.json" 2>/dev/null || echo 0
+}
+# AT §2.48's symptom: an honest chain or a placement refused for its certificate.
+REJECTION='rejecting chain from (verifier|auditor|observer|shill): |refusing placement [0-9]+: its certificate does not meet our quorum'
+rejections() { # node -> how many times it logged REJECTION
+  local n; n="$(grep -a -c -E "$REJECTION" "${ROOT[$1]}/node.log" 2>/dev/null)"; echo "${n:-0}"
 }
 committed_on() { # node -> how many attested scores it committed
   count "$1" "attested score committed"
@@ -440,6 +451,9 @@ log "Phase 7: the owner's shill joins and vouches for the repository"
 mkdir -p "${ROOT[shill]}/etc/stele"
 cp -r "${ROOT[owner]}/etc/stele/ads" "${ROOT[owner]}/etc/stele/attestations" "${ROOT[shill]}/etc/stele/" \
   || fail "phase 7" "the owner holds no Stele store to hand over"
+# §2.48 (phase 7b) is judged from here: what each honest node has logged so far.
+declare -A REJ0 CKPT0
+for n in verifier auditor observer; do REJ0[$n]="$(rejections "$n")"; CKPT0[$n]="$(count "$n" "checkpoint stored epoch")"; done
 node_start shill
 wait_for "$WAIT" joined observer shill || fail "phase 7" "the shill never joined"
 U[shill]="$(ctl uuid "${ROOT[shill]}")"
@@ -489,6 +503,23 @@ if standing_is observer c1s2 counted=osv-scanner:probe:"${U[shill]}":yes; then
 fi
 show_standing c1s
 ok "phase 7: the shill's replication refused below tier 3, its clean probe not counted, the owner's own never committed; still failing"
+
+log "Phase 7b: AT §2.48 — the late joiner takes the history a smaller group certified"
+# A chain from the owner may be refused: it rewrote its history in phase 7a.
+# A chain from anyone else, or a placement, refused for its certificate is
+# §2.48: a quorum judged against today's group instead of the one that signed.
+shill_holds() { [ "$(records_about shill "${U[owner]}")" -ge "$NREC" ]; }
+wait_for "$WAIT" shill_holds \
+  || { cat "$RUN/records-shill.json"; fail "phase 7b" "the shill holds $(records_about shill "${U[owner]}") of the $NREC verified record(s) about the owner"; }
+[ "$(rejections shill)" = 0 ] \
+  || { grep -a -E "$REJECTION" "${ROOT[shill]}/node.log" | head -5; fail "phase 7b" "the shill refused the group's history (§2.48)"; }
+for n in verifier auditor observer; do
+  [ "$(rejections "$n")" = "${REJ0[$n]}" ] \
+    || { grep -a -E "$REJECTION" "${ROOT[$n]}/node.log" | tail -5; fail "phase 7b" "$n refused an honest chain after the shill joined (§2.48)"; }
+done
+ckpt_since() { local n; for n in verifier auditor observer; do [ "$(count "$n" "checkpoint stored epoch")" -gt "${CKPT0[$n]}" ] || return 1; done; }
+wait_for "$WAIT" ckpt_since || fail "phase 7b" "no checkpoint finalized on every honest member after the shill joined"
+ok "phase 7b: the shill holds all $NREC record(s) about the owner; no honest chain refused; checkpoints still finalize"
 
 # --------------------------------------------------------------------------- #
 # Phase 8 — ATTACK 3: the owner withdraws; the auditor's finding still lands

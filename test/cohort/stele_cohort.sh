@@ -90,7 +90,11 @@
 #   floor, default AT's 0.5; lowering it weakens what phase 2 shows and is
 #   reported), SUBNET (default 10.9.12), BUILD_DIR, LOG_LEVEL, KEEP=1, FORGE=1,
 #   SYFT_VERSION / GITLEAKS_VERSION (what is fetched), VIEW_PORT (phase 11,
-#   default 18099).
+#   default 18099), MIN_TENURE (AT_REP_MIN_TENURE_SEC, default 300: a member
+#   holds at most tier 2 until a node has held it that long; phase 2 waits it
+#   out; steled's own default is 3600), BOOT (serial, the default: each node
+#   joins everyone running before the next starts; race: all started BOOT_GAP
+#   seconds apart, default 4, without waiting, as st-284840 was).
 
 set -u
 
@@ -218,6 +222,7 @@ node_start() { # name
     AT_PEER_NAME="$n" AT_PEER_SEED="stele-$n" \
     AT_REP_CHECKPOINT_SEC="$CHECKPOINT_SEC" \
     AT_REP_RESCORE_SEC="$RESCORE_SEC" \
+    AT_REP_MIN_TENURE_SEC="${MIN_TENURE:-300}" \
     "${floor[@]}" \
     LD_LIBRARY_PATH="$ATCORE:${LD_LIBRARY_PATH:-}" \
     "$STELED" extern_to_at at_to_extern "$LOG_LEVEL" \
@@ -299,6 +304,18 @@ net_up || exit 1
 # "Network: added peer <name>" is the one line every join path logs; the
 # identity layer's "confirmed peer" only appears on some (an admitted peer
 # logs "peer acceptance confirmed from" instead).
+if [ "${BOOT:-serial}" = race ]; then
+# Racing: a later node's request reaches a founder still choosing its group,
+# and a joiner can be admitted by two founders. The founders still have to
+# meet: the request is held until the founder's group is chosen, and a joiner
+# admitted by two groups sends the other one its history.
+log "Phase 1: starting ${NODES[*]} ${BOOT_GAP:-4} s apart, without waiting"
+for n in "${NODES[@]}"; do
+  node_start "$n"
+  sleep "${BOOT_GAP:-4}"
+  kill -0 "${PID[$n]}" 2>/dev/null || fail "phase 1" "$n died at start"
+done
+else
 log "Phase 1: starting ${NODES[*]} one at a time"
 started=()
 for n in "${NODES[@]}"; do
@@ -316,6 +333,7 @@ for n in "${NODES[@]}"; do
   fi
   started+=("$n")
 done
+fi
 for n in "${NODES[@]}"; do
   for m in "${NODES[@]}"; do
     [ "$m" = "$n" ] && continue
@@ -344,6 +362,28 @@ wait_for "$WARM_WAIT" above observer "${U[verifier]}" "$MIN_REP" \
 # st-543900 attested 26 s after start, with the owner at 0.55; the owner then
 # rose to 0.859 (0.868 on its evidence without the attested entry, 0.857 with
 # it), and phase 5 compared that to 0.55.
+# Settled must mean past the tenure gate too: a score held just under 0.80
+# looks settled, then jumps when the hold lifts, and phase 5 would read that
+# jump against the finding (the §2.64 shape, with tenure as the cause). The
+# clock is the observer's own, from its roster's first_seen, not this
+# script's: the observer starts last and starts its clock at its first rescore
+# after admitting a peer (st-3784096 settled at the held 0.79999995 and failed
+# phase 5 when the owner rose to 0.864 at the hold's end).
+tenure_served() { # node peer-uuid
+  python3 - "${ROOT[$1]}/etc/at/roster.cfg.json" "$2" "${MIN_TENURE:-300}" "$RESCORE_SEC" <<'P'
+import json, sys, time
+try:
+    first = json.load(open(sys.argv[1]))['members'][sys.argv[2]]['first_seen']
+except (OSError, ValueError, KeyError, TypeError):
+    sys.exit(1)
+sys.exit(0 if time.time() >= first + float(sys.argv[3]) + 3 * float(sys.argv[4]) else 1)
+P
+}
+log "Phase 2: waiting for the observer's tenure gate (MIN_TENURE=${MIN_TENURE:-300}s) to let go of the owner and the verifier"
+for n in owner verifier; do
+  wait_for $(( ${MIN_TENURE:-300} + WARM_WAIT )) tenure_served observer "${U[$n]}" \
+    || fail "phase 2" "the observer's tenure clock for $n never ran out"
+done
 log "Phase 2: and for the observer's view of the owner to settle (moves < $SETTLE_EPS over ${SETTLE_SEC}s)"
 prev="" cur="" settled=0 deadline=$(( SECONDS + WARM_WAIT ))
 while [ "$SECONDS" -lt "$deadline" ]; do

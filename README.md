@@ -74,7 +74,12 @@ panel green.
    version 3 attestation naming the one it re-ran. AT admits a replication
    only from a verifier at **tier 3** (0.80) in each co-signer's view, and
    every other attestation from tier 1. The tier is the effective one, after
-   any standing ceiling, and is 0 once the verifier is excluded.
+   any standing ceiling, and is 0 once the verifier is excluded. A verifier
+   also needs tenure: until a node has held it as a member for
+   `AT_REP_MIN_TENURE_SEC`, which `steled` sets to an hour unless the
+   environment says otherwise, that node holds it at tier 2 at most. A sybil
+   that answers AT's probes honestly reaches tier 4 in seconds (red team
+   `rt-3717776`), so tier alone was never a cost.
 2. **Agreement.** The viewer counts a verifier only at tier 3 in its own
    node's roster. A check is *confirmed* when two counted verifiers report the
    same findings digest (`stele_view --replicas`, `--tier`). Findings are
@@ -84,7 +89,7 @@ panel green.
    - a finding nobody has confirmed is *failing-unconfirmed*;
    - a clean bill short of the replicas is *single-source*;
    - only all-clean, all-confirmed checks are *verified-safe*.
-   A sybil below the tier is shown but not counted.
+   A sybil below the tier, or short of its tenure, is shown but not counted.
 3. **The anchor.** AT writes the node's roster beside its archive
    (`etc/at/roster.cfg.json`): every member's key, its tier, and the
    checkpoints the node stored. A record verifies only against that roster,
@@ -381,8 +386,11 @@ of the honest build's hash, which the founder reports. The phases:
    bundle verifies, and the standing stays failing. With `FORGE=1` the
    forged bundle is served from Forgejo as `.stele/standing.json`;
 7. **Attack 2:** the owner rewrites its own history and restarts. The shill's
-   replication is refused below tier 3, its clean probe is not counted, and
-   the owner's attestation about itself never commits;
+   replication is refused below tier 3, and still refused once its probes
+   have earned tier 4, because it is short of its tenure. Its clean probe is
+   not counted, and the owner's attestation about itself never commits. The
+   shill, a member that joined late, also takes the history a smaller group
+   certified, and no honest chain is refused after it joins (AT §2.48);
 8. **Attack 3:** the owner withdraws, and the auditor's next finding commits
    without it;
 9. the fix: *single-source* on one verifier's scan, *verified-safe* once the
