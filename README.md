@@ -304,6 +304,12 @@ AT C core comes from `../../lib/autonomous_trust` (`git submodule update --init
 ## Tests
 
 ```
+./test.sh                           # all of the below, with a PASS/FAIL summary
+```
+
+or one at a time:
+
+```
 at-stele/test-conformance.sh        # AT + stele, C and Python, 0 asymmetric
 python -m pytest at-stele/python/tests tools/tests verifier/tests viewer/tests
 node --test extension/tests/panel.test.mjs extension/tests/background.test.mjs
